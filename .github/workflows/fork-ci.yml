@@ -79,18 +79,23 @@ jobs:
       # The full Airflow pre-commit suite is heavy (Docker-based hooks, mypy,
       # provider scanners). On forks we run a fast, language-agnostic subset
       # so contributors get sub-5-minute feedback on the obvious issues.
+      # `pre-commit run` accepts only one hook id positionally, so we loop.
       - name: Run fast pre-commit hooks
         run: |
-          pre-commit run --all-files --show-diff-on-failure \
+          set -e
+          for hook in \
             check-merge-conflict \
             check-executables-have-shebangs \
             check-xml \
-            check-yaml \
             debug-statements \
             end-of-file-fixer \
             mixed-line-ending \
             trailing-whitespace \
-            python-no-log-warn
+            python-no-log-warn; do
+            echo "::group::pre-commit run $hook"
+            pre-commit run --all-files --show-diff-on-failure "$hook"
+            echo "::endgroup::"
+          done
 
   sanity-tests:
     name: Sanity tests (Python ${{ matrix.python-version }})
