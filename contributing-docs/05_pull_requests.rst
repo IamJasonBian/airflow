@@ -158,6 +158,96 @@ these guidelines:
 -   Adhere to guidelines for commit messages described in this `article <https://cbea.ms/git-commit/>`_.
     This makes the lives of those who come after you (and your future self) a lot easier.
 
+.. _pre-submit-checks-quick-reference:
+
+Pre-submit checks quick reference
+---------------------------------
+
+The checks below are the ones that catch the most issues before review. Run the ones
+relevant to the area you touched — running everything against the whole repository is
+slow and rarely necessary. ``<target_branch>`` is almost always ``main``.
+
+Always (regardless of area)
+...........................
+
+These are cheap and catch the majority of pre-review churn:
+
+- ``prek install`` once per checkout, so every ``git commit`` runs the fast hooks.
+- ``prek run --from-ref <target_branch> --stage pre-commit`` — runs the fast hooks
+  (ruff format, ruff check, license headers, common static checks) only against the
+  files changed on your branch.
+- ``prek run --from-ref <target_branch> --stage manual`` — slower hooks
+  (spellcheck, doc consistency, generated-file diffs). Run before pushing.
+- ``breeze selective-checks --commit-ref <commit_with_squashed_changes>`` — prints
+  the test types and static checks CI will run for your diff, so you can match
+  them locally.
+
+By area of change
+.................
+
+Pick the row(s) that match the files you touched. The "extra checks" column lists
+things contributors miss most often.
+
+**airflow-core** (scheduler, API server, models, CLI, Dag processing):
+
+- ``uv run --project airflow-core pytest <changed test files> -xvs`` for fast feedback.
+- ``prek run mypy-airflow-core --all-files`` after ruff is clean.
+- ``breeze testing core-tests --run-in-parallel`` for the full suite once tests pass locally.
+- Add a newsfragment under ``airflow-core/newsfragments/`` only for user-visible changes
+  (``{PR_NUMBER}.{bugfix|feature|improvement|doc|misc|significant}.rst``).
+
+**task-sdk**:
+
+- ``uv run --project task-sdk pytest <changed test files> -xvs``.
+- ``prek run mypy-task-sdk --all-files``.
+- ``breeze testing task-sdk-tests`` for the full suite.
+- task-sdk changes ship in airflow-core — add the newsfragment under
+  ``airflow-core/newsfragments/``, not under task-sdk.
+
+**airflow-ctl** (the standalone management CLI, as in
+`PR #66509 <https://github.com/apache/airflow/pull/66509>`__ — "Support --map-index in
+airflowctl tasks state"):
+
+- ``uv run --project airflow-ctl pytest <changed test files> -xvs`` and add unit
+  tests for both branches (``map_index`` provided vs. not).
+- ``prek run mypy-airflow-ctl --all-files``.
+- ``breeze testing airflow-ctl-tests`` for the full suite.
+- If the change calls a REST API endpoint, run an integration check that exercises
+  the mapped *and* unmapped paths — these are separate URLs and easy to regress.
+- If you add or rename a CLI flag, run ``prek run --stage manual`` so the spellcheck
+  hook flags any new identifier you need to add to the wordlist.
+- Do **not** add a newsfragment for airflow-ctl. Edit ``airflow-ctl/RELEASE_NOTES.rst``
+  directly for user-visible notes.
+
+**providers/<name>**:
+
+- ``uv run --project providers/<name> pytest <changed test files> -xvs``.
+- ``breeze run mypy <changed paths>`` (providers use the in-Breeze mypy, not the prek hook).
+- ``breeze testing providers-tests --test-type "Providers[<name>]"`` for the full provider suite.
+- Do **not** add a newsfragment. Edit ``providers/<name>/docs/changelog.rst`` directly
+  if the change is user-visible.
+
+**UI** (``airflow-core/src/airflow/ui``): build the UI and exercise the changed view
+in a browser; type-check and tests verify code correctness, not feature correctness.
+
+**Helm chart**: ``breeze testing helm-tests --use-xdist`` (optionally
+``--test-type <type>`` to narrow). Add a newsfragment under ``chart/newsfragments/`` for
+user-visible changes.
+
+**Docs only**: ``breeze build-docs`` for the affected distribution.
+
+Before you push
+...............
+
+After the area-specific checks pass:
+
+1. Re-read ``git diff <target_branch>...HEAD`` end to end and drop anything unrelated.
+2. ``git fetch upstream <target_branch> && git rebase upstream/<target_branch>`` so
+   CI runs against current code.
+3. Push to ``origin`` (your fork — never ``upstream``), then open the PR **as a
+   Draft** until CI is green. Project tooling auto-converts PRs that fail the quality
+   gates below to draft, so starting in draft avoids the round-trip.
+
 .. _pull-request-quality-criteria:
 
 Pull Request quality criteria
