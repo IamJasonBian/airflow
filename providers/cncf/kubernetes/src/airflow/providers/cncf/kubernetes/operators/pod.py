@@ -28,7 +28,7 @@ import os
 import re
 import shlex
 import string
-from collections.abc import Callable, Container, Iterable, Sequence
+from collections.abc import Callable, Container, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, suppress
 from enum import Enum
 from functools import cached_property
@@ -966,9 +966,30 @@ class KubernetesPodOperator(BaseOperator):
         pod_name = event["name"]
         pod_namespace = event["namespace"]
 
-        self.pod = self.hook.get_pod(pod_name, pod_namespace)
+        try:
+            self.pod = self.hook.get_pod(pod_name, pod_namespace)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+            # Pod was GC'd between trigger firing and re-entry. This is common
+            # when the cluster reclaims completed pods aggressively or a
+            # higher-priority workload (e.g. daemonset) preempts the node.
+            self.log.warning(
+                "Pod %s/%s not found after resuming from deferral — already GC'd.",
+                pod_namespace,
+                pod_name,
+            )
+            if event["status"] == "success":
+                # Trigger already observed the pod completed successfully;
+                # logs/XCom are unrecoverable but the task itself succeeded.
+                return
+            raise PodNotFoundException(
+                f"Pod {pod_namespace}/{pod_name} not found after resuming from deferral"
+            ) from e
 
         if not self.pod:
+            # Defensive: get_pod is documented to raise on missing pods, but
+            # keep this for any subclass override that returns None instead.
             raise PodNotFoundException("Could not find pod after resuming from deferral")
 
         follow = self.logging_interval is None
@@ -1053,12 +1074,14 @@ class KubernetesPodOperator(BaseOperator):
                         "Trigger emitted an %s event, failing the task: %s", event["status"], event["message"]
                     )
                     message = event.get("stack_trace", event["message"])
+                    if self.do_xcom_push:
+                        self._push_xcom_with_fan_out(context["ti"], xcom_sidecar_output)
                     raise AirflowException(message)
         finally:
             self._clean(event=event, context=context, result=xcom_sidecar_output)
 
-            if self.do_xcom_push and xcom_sidecar_output:
-                context["ti"].xcom_push(XCOM_RETURN_KEY, xcom_sidecar_output)
+        if self.do_xcom_push:
+            return xcom_sidecar_output
 
     def _clean(self, event: dict[str, Any], result: dict | None, context: Context) -> None:
         if self.pod is None:
@@ -1087,6 +1110,32 @@ class KubernetesPodOperator(BaseOperator):
                 context=context,
                 result=result,
             )
+
+    def _push_xcom_with_fan_out(self, ti: Any, value: Any) -> None:
+        """
+        Push ``return_value`` and, when ``multiple_outputs`` is set, also fan a dict out per key.
+
+        Mirrors the task runner's ``_push_xcom_if_needed`` so the failure-path manual pushes
+        in ``cleanup`` (sync) and ``trigger_reentry`` (async) honour ``multiple_outputs`` —
+        previously they pushed only ``return_value``, silently dropping per-key fan-out.
+        On success both paths return the value and let the runner perform the push instead.
+        """
+        if value is None:
+            return
+        if self.multiple_outputs:
+            if not isinstance(value, Mapping):
+                raise TypeError(
+                    f"Returned output was type {type(value)} expected dictionary for multiple_outputs"
+                )
+            for key in value:
+                if not isinstance(key, str):
+                    raise TypeError(
+                        "Returned dictionary keys must be strings when using "
+                        f"multiple_outputs, found {key} ({type(key)}) instead"
+                    )
+            for k, v in value.items():
+                ti.xcom_push(k, v)
+        ti.xcom_push(XCOM_RETURN_KEY, value)
 
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(3),
@@ -1169,9 +1218,9 @@ class KubernetesPodOperator(BaseOperator):
             failed = pod_phase != PodPhase.SUCCEEDED
 
         if failed:
-            if self.do_xcom_push and xcom_result and context:
+            if self.do_xcom_push and context:
                 # Ensure that existing XCom is pushed even in case of failure
-                context["ti"].xcom_push(XCOM_RETURN_KEY, xcom_result)
+                self._push_xcom_with_fan_out(context["ti"], xcom_result)
 
             if self.log_events_on_failure:
                 self._read_pod_container_states(pod, reraise=False)

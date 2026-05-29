@@ -80,7 +80,6 @@ from airflow.sdk.api.datamodels._generated import (
     PreviousTIResponse,
     PrevSuccessfulDagRunResponse,
     TaskBreadcrumbsResponse,
-    TaskInstance,
     TaskInstanceState,
     TaskStateResponse,
     TaskStatesResponse,
@@ -98,6 +97,10 @@ from airflow.sdk.api.datamodels._generated import (
     XComSequenceSliceResponse,
 )
 from airflow.sdk.exceptions import ErrorType
+from airflow.sdk.execution_time.workloads.task import (
+    # Pydantic needs this at runtime since we don't model_rebuild() StartupDetails.
+    TaskInstanceDTO,  # noqa: TC001
+)
 
 try:
     from socket import recv_fds
@@ -334,7 +337,7 @@ class CommsDecoder(Generic[ReceiveMsgType, SendMsgType]):
 class StartupDetails(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    ti: TaskInstance
+    ti: TaskInstanceDTO
     dag_rel_path: str
     bundle_info: BundleInfo
     start_date: datetime
@@ -509,7 +512,7 @@ class XComResult(XComResponse):
 
 class XComCountResponse(BaseModel):
     len: int
-    type: Literal["XComLengthResponse"] = "XComLengthResponse"
+    type: Literal["XComCountResponse"] = "XComCountResponse"
 
 
 class XComSequenceIndexResult(BaseModel):
@@ -595,6 +598,12 @@ class AssetsByAliasResult(BaseModel):
             assets=[AssetResult.from_asset_response(a) for a in asset_responses],
             type="AssetsByAliasResult",
         )
+
+
+class VariableKeysResult(BaseModel):
+    keys: list[str]
+    total_entries: int
+    type: Literal["VariableKeysResult"] = "VariableKeysResult"
 
 
 class DagRunResult(DagRun):
@@ -783,6 +792,7 @@ ToTask = Annotated[
     | TaskBreadcrumbsResult
     | TaskStatesResult
     | VariableResult
+    | VariableKeysResult
     | XComCountResponse
     | XComResult
     | XComSequenceIndexResult
@@ -862,7 +872,7 @@ class GetXComCount(BaseModel):
     dag_id: str
     run_id: str
     task_id: str
-    type: Literal["GetNumberXComs"] = "GetNumberXComs"
+    type: Literal["GetXComCount"] = "GetXComCount"
 
 
 class GetXComSequenceItem(BaseModel):
@@ -916,7 +926,8 @@ class GetTaskState(BaseModel):
 class SetTaskState(BaseModel):
     ti_id: UUID
     key: str
-    value: str
+    value: JsonValue
+    expires_at: AwareDatetime | None
     type: Literal["SetTaskState"] = "SetTaskState"
 
 
@@ -947,14 +958,14 @@ class GetAssetStateByUri(BaseModel):
 class SetAssetStateByName(BaseModel):
     name: str
     key: str
-    value: str
+    value: JsonValue
     type: Literal["SetAssetStateByName"] = "SetAssetStateByName"
 
 
 class SetAssetStateByUri(BaseModel):
     uri: str
     key: str
-    value: str
+    value: JsonValue
     type: Literal["SetAssetStateByUri"] = "SetAssetStateByUri"
 
 
@@ -988,6 +999,13 @@ class GetConnection(BaseModel):
 class GetVariable(BaseModel):
     key: str
     type: Literal["GetVariable"] = "GetVariable"
+
+
+class GetVariableKeys(BaseModel):
+    prefix: str | None = None
+    limit: int = 1000
+    offset: int = 0
+    type: Literal["GetVariableKeys"] = "GetVariableKeys"
 
 
 class PutVariable(BaseModel):
@@ -1204,6 +1222,7 @@ ToSupervisor = Annotated[
     | GetTaskBreadcrumbs
     | GetTaskStates
     | GetVariable
+    | GetVariableKeys
     | GetXCom
     | GetXComCount
     | GetXComSequenceItem
