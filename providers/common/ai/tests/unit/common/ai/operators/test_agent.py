@@ -29,15 +29,13 @@ from airflow.providers.common.ai.toolsets.logging import LoggingToolset
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_1_PLUS
 
 try:
-    from airflow.sdk.serde import allow_class
-
-    _allow_class: object | None = allow_class
+    from airflow.sdk.serde import SUPPORTS_OPERATOR_DESERIALIZATION_WALKER as _CORE_WALKER
 except ImportError:
-    _allow_class = None
+    _CORE_WALKER = False
 
-requires_allow_class = pytest.mark.skipif(
-    _allow_class is None,
-    reason="Requires airflow.sdk.serde.allow_class (Airflow with typed-XCom support).",
+requires_typed_xcom = pytest.mark.skipif(
+    not _CORE_WALKER,
+    reason="Requires a core with the worker-side deserialization-class walk.",
 )
 
 
@@ -50,9 +48,7 @@ def _make_mock_run_result(output):
     """Create a mock AgentRunResult compatible with log_run_summary."""
     mock_result = MagicMock()
     mock_result.output = output
-    mock_result.usage.return_value = MagicMock(
-        requests=1, tool_calls=0, input_tokens=0, output_tokens=0, total_tokens=0
-    )
+    mock_result.usage = MagicMock(requests=1, tool_calls=0, input_tokens=0, output_tokens=0, total_tokens=0)
     mock_result.response = MagicMock(model_name="test-model")
     mock_result.all_messages.return_value = []
     return mock_result
@@ -210,7 +206,7 @@ class TestAgentOperatorExecute:
         assert create_call[1]["retries"] == 3
         assert create_call[1]["model_settings"] == {"temperature": 0}
 
-    @requires_allow_class
+    @requires_typed_xcom
     @patch("airflow.providers.common.ai.operators.agent.PydanticAIHook", autospec=True)
     def test_execute_structured_output(self, mock_hook_cls):
         """Structured output keeps the Pydantic instance so downstream tasks can type-hint it."""
@@ -230,26 +226,9 @@ class TestAgentOperatorExecute:
         assert result.text == "Great"
         assert result.score == 0.95
 
-    @requires_allow_class
-    def test_init_rejects_nested_output_type(self):
-        """A BaseModel defined inside a function carries ``<locals>`` and can't survive XCom."""
-
-        def _build():
-            class Nested(BaseModel):
-                v: int
-
-            return AgentOperator(task_id="t", prompt="p", llm_conn_id="c", output_type=Nested)
-
-        with pytest.raises(ValueError, match="defined inside a function"):
-            _build()
-
-    @requires_allow_class
-    def test_init_registers_output_type_in_extra_allowed(self):
-        from airflow.sdk.module_loading import qualname
-        from airflow.sdk.serde import _extra_allowed
-
-        AgentOperator(task_id="t", prompt="p", llm_conn_id="c", output_type=Summary)
-        assert qualname(Summary) in _extra_allowed
+    def test_declares_output_type_for_deserialization(self):
+        """Declares ``output_type`` so the worker-side DAG walk registers it for deserialization."""
+        assert "output_type" in AgentOperator.deserialization_allowed_class_fields
 
     @patch("airflow.providers.common.ai.operators.agent.PydanticAIHook", autospec=True)
     def test_execute_with_model_id(self, mock_hook_cls):
@@ -294,7 +273,7 @@ class TestAgentOperatorExecute:
         assert result == "Approved output"
         mock_run_hitl.assert_called_once_with(op, context, "Initial output", message_history=msg_history)
 
-    @requires_allow_class
+    @requires_typed_xcom
     @pytest.mark.skipif(
         not AIRFLOW_V_3_1_PLUS, reason="Human in the loop is only compatible with Airflow >= 3.1.0"
     )

@@ -146,16 +146,56 @@ Curated toolset wrapping
 The ``DbApiHook`` is resolved lazily from ``db_conn_id`` on first tool call
 via ``BaseHook.get_connection(conn_id).get_hook()``.
 
+In read-only mode (``allow_writes=False``, the default) the ``query`` tool also
+accepts read-only metadata statements -- ``DESCRIBE``/``DESC`` and ``SHOW`` --
+in addition to SELECT-family queries. Agents commonly open with ``DESCRIBE`` to
+learn a table's columns, so permitting it keeps runs deterministic instead of
+hard-failing on schema discovery. The toolset passes the connection's dialect to
+the validator, so ``SHOW`` is recognized on databases that support it (Snowflake,
+MySQL, etc.); on databases without ``SHOW`` it stays rejected. Data-modifying
+statements remain blocked -- including ones hidden behind ``DESCRIBE``/``EXPLAIN``
+(e.g. ``EXPLAIN DELETE ...``, ``DESCRIBE DROP TABLE ...``), which the validator
+rejects by scanning the parsed statement for write operations. Like ``SELECT``,
+metadata statements are not scoped by ``allowed_tables`` (see
+:ref:`allowed-tables-limitation`) -- an agent can ``DESCRIBE`` a table outside the
+list, so rely on database permissions to restrict access.
+
+Multi-schema warehouses
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When an agent's tables live in several schemas of one database -- common on
+Snowflake -- list them with schema-qualified ``allowed_tables`` entries:
+
+.. code-block:: python
+
+    SQLToolset(
+        db_conn_id="snowflake_hq",
+        allowed_tables=["MODEL_ASTRO.DEPLOYMENT_IMAGE_DETAILS", "MODEL_CRM.SF_ASTRO_ORGS"],
+    )
+
+``list_tables`` then introspects each referenced schema and returns the matching
+tables fully qualified (e.g. ``MODEL_ASTRO.DEPLOYMENT_IMAGE_DETAILS``), and
+``get_schema`` routes each qualified name to its own schema. Without this, a
+single ``schema`` only covers one namespace, and leaving ``schema`` unset made
+introspection query a literal ``"None"`` schema and fail. Unqualified entries
+fall back to ``schema``, and table-name matching is case-insensitive (databases
+reflect identifiers in their own case). For tables in a different *database*, use
+a separate toolset whose connection points at that database.
+
 Parameters
 ^^^^^^^^^^
 
 - ``db_conn_id``: Airflow connection ID for the database.
 - ``allowed_tables``: Restrict which tables the agent can discover via
-  ``list_tables`` and ``get_schema``. ``None`` (default) exposes all tables.
+  ``list_tables`` and ``get_schema``. ``None`` (default) exposes all tables in
+  ``schema``. Entries may be schema-qualified (``"SCHEMA.TABLE"``) to span
+  multiple schemas; see above. Matching is case-insensitive.
   See :ref:`allowed-tables-limitation` for an important caveat.
-- ``schema``: Database schema/namespace for table listing and introspection.
+- ``schema``: Default schema/namespace for unqualified table listing and
+  introspection. Schema-qualified ``allowed_tables`` entries override it per table.
 - ``allow_writes``: Allow data-modifying SQL (INSERT, UPDATE, DELETE, etc.).
-  Default ``False`` — only SELECT-family statements are permitted.
+  Default ``False`` -- only SELECT-family and read-only metadata
+  (``DESCRIBE``/``SHOW``) statements are permitted.
 - ``max_rows``: Maximum rows returned from the ``query`` tool. Default ``50``.
 
 ``DataFusionToolset``
@@ -272,6 +312,12 @@ Parameters
 - ``tool_prefix``: Optional prefix prepended to tool names to avoid
   collisions when using multiple MCP servers (e.g. ``"weather"`` produces
   ``"weather_get_forecast"``).
+- ``token_provider``: Optional zero-argument callable returning a bearer token.
+  When set, it overrides the connection's static ``password`` for the
+  ``Authorization`` header and is called each time the server connection is
+  established -- use it for short-lived or minted tokens (e.g. a Snowflake
+  managed MCP server authenticated with a key-pair JWT). See
+  :ref:`howto/connection:mcp`.
 
 Using Multiple MCP Servers
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -479,6 +525,29 @@ Security
 LLM agents call tools based on natural-language reasoning. This makes them
 powerful but introduces risks that don't exist with deterministic operators.
 
+What the agent can and cannot reach
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+An agent's reach is exactly the set of tools you register on it, and nothing
+more. The model never executes arbitrary code: it can only request one of the
+tools you provided, and pydantic-ai rejects any tool name outside that set
+before it runs. If no registered tool can read the environment, the
+filesystem, or other connections, the model cannot reach them, regardless of
+what the prompt instructs it to do.
+
+This is what "untrusted" means in this context. The DAG file itself is
+author-written and trusted, exactly like any other DAG. What is untrusted is
+the model's *output*: the tool-call requests and text it generates. That output
+is confined to your registered tools and bounded by the tool-call budget. An
+agent cannot create a new connection, read another connection's credentials, or
+run a shell command unless a tool you registered exposes that capability.
+
+The corollary is that every tool you add widens the blast radius, and a custom
+toolset is only as safe as you make it. A tool that returns ``os.environ`` or
+runs shell commands hands the model whatever that tool can reach. Audit any
+custom toolset, and any MCP server you connect through ``MCPToolset``, against
+the same standard the bundled toolsets below are built to.
+
 Defense Layers
 ^^^^^^^^^^^^^^
 
@@ -503,7 +572,9 @@ No single layer is sufficient — they work together.
      - Does not restrict what arguments the agent passes to allowed methods.
    * - **SQLToolset: read-only by default**
      - ``allow_writes=False`` (default) validates every SQL query through
-       ``validate_sql()`` and rejects INSERT, UPDATE, DELETE, DROP, etc.
+       ``validate_sql()``: SELECT-family and read-only metadata
+       (``DESCRIBE``/``SHOW``) statements pass; INSERT, UPDATE, DELETE, DROP,
+       and writes hidden behind ``EXPLAIN`` are rejected.
      - Does not prevent the agent from reading sensitive data that the
        database user has SELECT access to.
    * - **DataFusionToolset: read-only by default**
@@ -521,6 +592,12 @@ No single layer is sufficient — they work together.
      - Truncates query results to ``max_rows`` (default 50), preventing the
        agent from pulling entire tables into context.
      - Does not limit the number of queries the agent can make.
+   * - **MCPToolset: external server**
+     - Connects the agent to tools exposed by an MCP server, authenticated
+       through an Airflow connection.
+     - Does **not** constrain what those tools do. An MCP server can expose
+       shell, filesystem, or network access. Run only trusted servers and
+       audit the tools they expose.
    * - **pydantic-ai: tool call budget**
      - pydantic-ai's ``max_result_retries`` and ``model_settings`` control
        how many tool-call rounds the agent can make before stopping.
