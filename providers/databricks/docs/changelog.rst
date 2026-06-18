@@ -26,6 +26,42 @@
 Changelog
 ---------
 
+.. note::
+   ``DatabricksCreateJobsOperator``, ``DatabricksSubmitRunOperator`` and ``DatabricksRunNowOperator``
+   now assemble and validate their Databricks request payload at task **execution** time instead of
+   at operator construction time. This is required so that templated ``json`` payloads and templated
+   named parameters (including values pulled from XCom) are rendered before the payload is built.
+   As a result, payload-validation errors that previously surfaced while the Dag was parsed — e.g.
+   ``git_source is required for dbt_task``, ``'pipeline_name' is not allowed in conjunction with
+   'pipeline_id'``, ``Argument 'job_name' is not allowed with argument 'job_id'`` and invalid
+   payload types — now surface when the task runs. A templated ``json`` payload may now also resolve
+   to a Python-dict-literal string (what classic Jinja produces when rendering a dict pulled from
+   XCom), in addition to a mapping or a JSON string.
+
+7.16.0
+......
+
+Features
+~~~~~~~~
+
+* ``Fail fast for non-serializable retry_args in deferrable operators and triggers (#64960)``
+* ``Forward Airflow Dag params to Databricks job parameters in CreateJobs/SubmitRun/RunNow (#66613)``
+* ``Add session-level query tags to Databricks SQL operators (#66895)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Lock in Databricks workflow depends_on parent-key behavior (#66681)``
+
+Misc
+~~~~
+
+* ``Remove further findings from positional session check (#67712)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
 7.15.0
 ......
 

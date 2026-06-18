@@ -22,17 +22,14 @@ import json
 from collections.abc import Sequence
 from datetime import timedelta
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel
 
 from airflow.providers.common.ai.hooks.pydantic_ai import PydanticAIHook
 from airflow.providers.common.ai.mixins.hitl_review import HITLReviewMixin
 from airflow.providers.common.ai.utils.logging import log_run_summary, wrap_toolsets_for_logging
-from airflow.providers.common.ai.utils.output_type import (
-    iter_base_model_classes,
-    rehydrate_pydantic_output,
-)
+from airflow.providers.common.ai.utils.output_type import rehydrate_pydantic_output
 from airflow.providers.common.compat.sdk import (
     AirflowOptionalProviderFeatureException,
     BaseOperator,
@@ -42,9 +39,12 @@ from airflow.providers.common.compat.sdk import (
 from airflow.providers.common.compat.version_compat import AIRFLOW_V_3_1_PLUS
 
 try:
-    from airflow.sdk.serde import allow_class
-except ImportError:  # pragma: no cover - Airflow versions before allow_class shipped
-    allow_class = None  # type: ignore[assignment]
+    # See LLMOperator: new enough cores register declared ``output_type`` classes
+    # from a worker-side DAG walk, so the model instance flows through XCom; older
+    # cores dump to a dict instead.
+    from airflow.sdk.serde import SUPPORTS_OPERATOR_DESERIALIZATION_WALKER as _CORE_WALKER
+except ImportError:  # pragma: no cover - cores before the worker-side registration walk
+    _CORE_WALKER = False
 
 if TYPE_CHECKING:
     from pydantic_ai import Agent
@@ -90,6 +90,31 @@ class HITLReviewLink(BaseOperatorLink):
         )
 
 
+def _build_code_mode() -> Any:
+    """
+    Return a pydantic-ai-harness ``CodeMode`` capability, or raise if not installed.
+
+    Kept here (not a module-level import) because ``pydantic-ai-harness`` is an
+    optional dependency behind the ``code-mode`` extra; importing it eagerly
+    would break installs that don't enable the extra.
+    """
+    try:
+        from pydantic_ai_harness import CodeMode
+    except ImportError as e:
+        # Only report "extra not installed" when pydantic-ai-harness itself is
+        # missing. A failure deeper in its import chain (a broken or missing
+        # transitive dependency) is a different problem -- re-raise it as-is so
+        # the real error isn't masked by a misleading "install the extra" message.
+        missing = e.name or ""
+        if missing == "pydantic_ai_harness" or missing.startswith("pydantic_ai_harness."):
+            raise AirflowOptionalProviderFeatureException(
+                "code_mode=True requires the 'code-mode' extra. Install it with "
+                '`pip install "apache-airflow-providers-common-ai[code-mode]"`.'
+            ) from e
+        raise
+    return CodeMode()
+
+
 class AgentOperator(BaseOperator, HITLReviewMixin):
     """
     Run a pydantic-ai Agent with tools and multi-turn reasoning.
@@ -123,8 +148,24 @@ class AgentOperator(BaseOperator, HITLReviewMixin):
         or tool budget. ``None`` (default) means no enforcement.
     :param durable: When ``True``, enables step-level caching of model
         responses and tool results for durable execution.  On retry, cached
-        steps are replayed instead of re-executing.  Default ``False``.
+        steps are replayed instead of re-executing.  Each cached step is
+        verified against the current request before replay: if the prompt,
+        model, settings, tools, or message history changed since the failed
+        attempt, the affected steps re-run live (with a warning) instead of
+        replaying stale results.  Default ``False``.
         Requires ``[common.ai] durable_cache_path`` to be set.
+    :param code_mode: When ``True``, wraps the agent's tools in a single
+        ``run_code`` tool powered by the Monty sandbox (pydantic-ai-harness
+        ``CodeMode``). Instead of one model round-trip per tool call, the model
+        writes Python that calls the tools as functions, with loops and
+        ``asyncio.gather``, in one turn. The generated code runs in Monty's
+        deny-by-default sandbox; the tools it calls still run in the worker, so
+        ``code_mode`` does not widen what the tools can reach -- it only changes
+        how the model invokes them. Requires the ``code-mode`` extra
+        (``pip install "apache-airflow-providers-common-ai[code-mode]"``).
+        Cannot be combined with ``durable=True`` (durable replay assumes a
+        stable per-step call order that code mode does not guarantee).
+        Default ``False``.
 
     **HITL Review parameters** (requires the ``hitl_review`` plugin):
 
@@ -150,6 +191,8 @@ class AgentOperator(BaseOperator, HITLReviewMixin):
         when a downstream consumer needs the dict shape.
     """
 
+    deserialization_allowed_class_fields: ClassVar[tuple[str, ...]] = ("output_type",)
+
     template_fields: Sequence[str] = (
         "prompt",
         "llm_conn_id",
@@ -173,6 +216,7 @@ class AgentOperator(BaseOperator, HITLReviewMixin):
         agent_params: dict[str, Any] | None = None,
         usage_limits: UsageLimits | None = None,
         durable: bool = False,
+        code_mode: bool = False,
         # Agent feedback parameters
         enable_hitl_review: bool = False,
         max_hitl_iterations: int = 5,
@@ -189,19 +233,28 @@ class AgentOperator(BaseOperator, HITLReviewMixin):
         self.system_prompt = system_prompt
         self.output_type = output_type
         self.serialize_output = serialize_output
-        self._serialize_model_output = serialize_output or allow_class is None
-        if not serialize_output and allow_class is not None:
-            for model_cls in iter_base_model_classes(output_type):
-                allow_class(model_cls)
+        # See LLMOperator: instance flows when the core registers ``output_type``
+        # via its worker-side DAG walk; otherwise (or on opt-in) dump to a dict.
+        self._serialize_model_output = serialize_output or not _CORE_WALKER
         self.toolsets = toolsets
         self.enable_tool_logging = enable_tool_logging
         self.agent_params = agent_params or {}
         self.usage_limits = usage_limits
 
         self.durable = durable
+        self.code_mode = code_mode
 
         if durable and enable_hitl_review:
             raise ValueError("durable=True and enable_hitl_review=True cannot be used together.")
+
+        if durable and code_mode:
+            # Durable replay caches individual model/tool steps via CachingModel /
+            # CachingToolset and a shared step counter that assumes a stable call
+            # order across runs. Code mode collapses tools into one ``run_code``
+            # tool and lets the model emit arbitrary Python, so step counts and
+            # ordering can differ between the original run and a retry, breaking
+            # replay. Reject the combination rather than silently mis-replaying.
+            raise ValueError("durable=True and code_mode=True cannot be used together.")
 
         self.enable_hitl_review = enable_hitl_review
         self.max_hitl_iterations = max_hitl_iterations
@@ -233,6 +286,10 @@ class AgentOperator(BaseOperator, HITLReviewMixin):
             if self.enable_tool_logging:
                 toolsets = wrap_toolsets_for_logging(toolsets, self.log)
             extra_kwargs["toolsets"] = toolsets
+        if self.code_mode:
+            capabilities = list(extra_kwargs.get("capabilities") or [])
+            capabilities.append(_build_code_mode())
+            extra_kwargs["capabilities"] = capabilities
         return self.llm_hook.create_agent(
             output_type=self.output_type,
             instructions=self.system_prompt,
