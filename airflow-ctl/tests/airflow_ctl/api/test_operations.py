@@ -91,6 +91,12 @@ from airflowctl.api.datamodels.generated import (
     QueuedEventCollectionResponse,
     QueuedEventResponse,
     ReprocessBehavior,
+    TaskDependencyCollectionResponse,
+    TaskDependencyResponse,
+    TaskInstanceCollectionResponse,
+    TaskInstanceHistoryCollectionResponse,
+    TaskInstanceHistoryResponse,
+    TaskInstanceResponse,
     TriggerDAGRunPostBody,
     VariableBody,
     VariableCollectionResponse,
@@ -1905,6 +1911,158 @@ class TestXComOperations:
             map_index=self.map_index,
         )
         assert response == self.key
+
+
+class TestTaskInstancesOperations:
+    """Test suite for task instance operations."""
+
+    dag_id: str = "test_dag"
+    dag_run_id: str = "manual__2025-01-24T00:00:00+00:00"
+    task_id: str = "test_task"
+    map_index: int = 0
+
+    task_instance_response = TaskInstanceResponse(
+        id=uuid.uuid4(),
+        task_id=task_id,
+        dag_id=dag_id,
+        dag_run_id=dag_run_id,
+        map_index=-1,
+        run_after=datetime.datetime(2025, 1, 24, 0, 0, 0),
+        state=None,
+        try_number=1,
+        max_tries=1,
+        task_display_name=task_id,
+        dag_display_name=dag_id,
+        pool="default_pool",
+        pool_slots=1,
+        executor_config="{}",
+    )
+
+    task_instance_collection_response = TaskInstanceCollectionResponse(
+        task_instances=[task_instance_response],
+        total_entries=1,
+    )
+
+    task_instance_history_response = TaskInstanceHistoryResponse(
+        task_id=task_id,
+        dag_id=dag_id,
+        dag_run_id=dag_run_id,
+        map_index=-1,
+        try_number=1,
+        max_tries=1,
+        task_display_name=task_id,
+        dag_display_name=dag_id,
+        pool="default_pool",
+        pool_slots=1,
+        executor_config="{}",
+    )
+
+    task_instance_history_collection_response = TaskInstanceHistoryCollectionResponse(
+        task_instances=[task_instance_history_response],
+        total_entries=1,
+    )
+
+    task_dependency_collection_response = TaskDependencyCollectionResponse(
+        dependencies=[TaskDependencyResponse(name="Trigger Rule", reason="Not all upstream tasks done")],
+    )
+
+    def test_get(self):
+        """Test fetching a single task instance without map_index."""
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == (
+                f"/api/v2/dags/{self.dag_id}/dagRuns/{self.dag_run_id}/taskInstances/{self.task_id}"
+            )
+            return httpx.Response(200, json=json.loads(self.task_instance_response.model_dump_json()))
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.task_instances.get(
+            dag_id=self.dag_id,
+            dag_run_id=self.dag_run_id,
+            task_id=self.task_id,
+        )
+        assert response == self.task_instance_response
+
+    def test_get_with_map_index(self):
+        """Test fetching a mapped task instance with map_index."""
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == (
+                f"/api/v2/dags/{self.dag_id}/dagRuns/{self.dag_run_id}/"
+                f"taskInstances/{self.task_id}/{self.map_index}"
+            )
+            return httpx.Response(200, json=json.loads(self.task_instance_response.model_dump_json()))
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.task_instances.get(
+            dag_id=self.dag_id,
+            dag_run_id=self.dag_run_id,
+            task_id=self.task_id,
+            map_index=self.map_index,
+        )
+        assert response == self.task_instance_response
+
+    def test_list(self):
+        """Test listing task instances for a dag run."""
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == (f"/api/v2/dags/{self.dag_id}/dagRuns/{self.dag_run_id}/taskInstances")
+            return httpx.Response(
+                200, json=json.loads(self.task_instance_collection_response.model_dump_json())
+            )
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.task_instances.list(
+            dag_id=self.dag_id,
+            dag_run_id=self.dag_run_id,
+        )
+        assert response == self.task_instance_collection_response
+
+    @pytest.mark.parametrize("map_index", [-1, 0, 2])
+    def test_get_tries(self, map_index):
+        """Test fetching the tries history with map_index branching."""
+        expected_path = f"/api/v2/dags/{self.dag_id}/dagRuns/{self.dag_run_id}/taskInstances/{self.task_id}"
+        if map_index >= 0:
+            expected_path = f"{expected_path}/{map_index}"
+        expected_path = f"{expected_path}/tries"
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == expected_path
+            return httpx.Response(
+                200, json=json.loads(self.task_instance_history_collection_response.model_dump_json())
+            )
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.task_instances.get_tries(
+            dag_id=self.dag_id,
+            dag_run_id=self.dag_run_id,
+            task_id=self.task_id,
+            map_index=map_index,
+        )
+        assert response == self.task_instance_history_collection_response
+
+    @pytest.mark.parametrize("map_index", [-1, 0, 2])
+    def test_get_dependencies(self, map_index):
+        """Test fetching task dependencies with map_index branching."""
+        expected_path = f"/api/v2/dags/{self.dag_id}/dagRuns/{self.dag_run_id}/taskInstances/{self.task_id}"
+        if map_index >= 0:
+            expected_path = f"{expected_path}/{map_index}"
+        expected_path = f"{expected_path}/dependencies"
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == expected_path
+            return httpx.Response(
+                200, json=json.loads(self.task_dependency_collection_response.model_dump_json())
+            )
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.task_instances.get_dependencies(
+            dag_id=self.dag_id,
+            dag_run_id=self.dag_run_id,
+            task_id=self.task_id,
+            map_index=map_index,
+        )
+        assert response == self.task_dependency_collection_response
 
 
 class TestPluginsOperations:

@@ -68,6 +68,9 @@ from airflowctl.api.datamodels.generated import (
     ProviderCollectionResponse,
     QueuedEventCollectionResponse,
     QueuedEventResponse,
+    TaskDependencyCollectionResponse,
+    TaskInstanceCollectionResponse,
+    TaskInstanceHistoryCollectionResponse,
     TaskInstanceResponse,
     TriggerDAGRunPostBody,
     VariableBody,
@@ -934,6 +937,59 @@ class TaskInstancesOperations(BaseOperations):
         try:
             self.response = self.client.get(path)
             return TaskInstanceResponse.model_validate_json(self.response.content)
+        except ServerResponseError as e:
+            raise e
+
+    def list(self, dag_id: str, dag_run_id: str) -> TaskInstanceCollectionResponse | ServerResponseError:
+        """List task instances for a dag run."""
+        return super().execute_list(
+            path=f"dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances",
+            data_model=TaskInstanceCollectionResponse,
+        )
+
+    def get_tries(
+        self,
+        dag_id: str,
+        dag_run_id: str,
+        task_id: str,
+        map_index: int = None,  # type: ignore
+    ) -> TaskInstanceHistoryCollectionResponse | ServerResponseError:
+        """
+        Get the history of tries for a task instance.
+
+        When ``map_index`` is non-negative, the mapped task instance endpoint is
+        called; otherwise the standard (unmapped) endpoint is used.
+        """
+        path = f"dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}"
+        if map_index is not None and map_index >= 0:
+            path = f"{path}/{map_index}"
+        path = f"{path}/tries"
+        try:
+            self.response = self.client.get(path)
+            return TaskInstanceHistoryCollectionResponse.model_validate_json(self.response.content)
+        except ServerResponseError as e:
+            raise e
+
+    def get_dependencies(
+        self,
+        dag_id: str,
+        dag_run_id: str,
+        task_id: str,
+        map_index: int = None,  # type: ignore
+    ) -> TaskDependencyCollectionResponse | ServerResponseError:
+        """
+        Get dependencies blocking a task instance from getting scheduled.
+
+        When ``map_index`` is non-negative, the mapped task instance endpoint is
+        called; otherwise the standard (unmapped) endpoint is used.
+        """
+        path = f"dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}"
+        if map_index is not None and map_index >= 0:
+            path = f"{path}/{map_index}"
+        path = f"{path}/dependencies"
+        try:
+            self.response = self.client.get(path)
+            return TaskDependencyCollectionResponse.model_validate_json(self.response.content)
         except ServerResponseError as e:
             raise e
 

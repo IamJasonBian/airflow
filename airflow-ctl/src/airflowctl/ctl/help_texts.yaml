@@ -103,3 +103,6 @@ plugins:
 
 taskinstances:
   get: "Retrieve a task instance by Dag ID, run ID, and task ID"
+  list: "List task instances for a given Dag run"
+  get-tries: "List the history of tries for a task instance"
+  get-dependencies: "List dependencies blocking a task instance from being scheduled"
