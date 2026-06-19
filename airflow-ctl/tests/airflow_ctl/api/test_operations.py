@@ -48,6 +48,7 @@ from airflowctl.api.datamodels.generated import (
     BulkCreateActionPoolBody,
     BulkCreateActionVariableBody,
     BulkResponse,
+    ClearTaskInstanceCollectionResponse,
     Config,
     ConfigOption,
     ConfigSection,
@@ -61,7 +62,10 @@ from airflowctl.api.datamodels.generated import (
     DAGPatchBody,
     DAGResponse,
     DagRunAssetReference,
+    DAGRunClearBody,
     DAGRunCollectionResponse,
+    DagRunMutableStates,
+    DAGRunPatchBody,
     DAGRunResponse,
     DagRunState,
     DagRunTriggeredByType,
@@ -100,7 +104,7 @@ from airflowctl.api.datamodels.generated import (
     XComResponse,
     XComResponseNative,
 )
-from airflowctl.api.operations import BaseOperations
+from airflowctl.api.operations import BaseOperations, ServerResponseError
 from airflowctl.exceptions import AirflowCtlConnectionException
 
 if TYPE_CHECKING:
@@ -1272,6 +1276,72 @@ class TestDagRunOperations:
         assert response == self.dag_run_collection_response
         assert "state" not in captured_params
         assert captured_params["limit"] == "5"
+
+    def test_clear_no_dry_run_returns_dag_run(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert request.url.path == f"/api/v2/dags/{self.dag_id}/dagRuns/{self.dag_run_id}/clear"
+            return httpx.Response(200, json=json.loads(self.dag_run_response.model_dump_json()))
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.dag_runs.clear(
+            dag_id=self.dag_id,
+            dag_run_id=self.dag_run_id,
+            dag_run_clear_body=DAGRunClearBody(dry_run=False),
+        )
+        assert response == self.dag_run_response
+
+    def test_clear_dry_run_returns_task_instance_collection(self):
+        clear_collection = ClearTaskInstanceCollectionResponse(task_instances=[], total_entries=0)
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert request.url.path == f"/api/v2/dags/{self.dag_id}/dagRuns/{self.dag_run_id}/clear"
+            return httpx.Response(200, json=json.loads(clear_collection.model_dump_json()))
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.dag_runs.clear(
+            dag_id=self.dag_id,
+            dag_run_id=self.dag_run_id,
+            dag_run_clear_body=DAGRunClearBody(dry_run=True),
+        )
+        assert response == clear_collection
+
+    def test_update(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.method == "PATCH"
+            assert request.url.path == f"/api/v2/dags/{self.dag_id}/dagRuns/{self.dag_run_id}"
+            return httpx.Response(200, json=json.loads(self.dag_run_response.model_dump_json()))
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.dag_runs.update(
+            dag_id=self.dag_id,
+            dag_run_id=self.dag_run_id,
+            dag_run_patch_body=DAGRunPatchBody(state=DagRunMutableStates.SUCCESS),
+        )
+        assert response == self.dag_run_response
+
+    def test_delete(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.method == "DELETE"
+            assert request.url.path == f"/api/v2/dags/{self.dag_id}/dagRuns/{self.dag_run_id}"
+            return httpx.Response(204)
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.dag_runs.delete(dag_id=self.dag_id, dag_run_id=self.dag_run_id)
+        assert response == self.dag_run_id
+
+    def test_delete_not_found_raises(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                json={"detail": "not found"},
+                headers={"content-type": "application/json"},
+            )
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        with pytest.raises(ServerResponseError):
+            client.dag_runs.delete(dag_id=self.dag_id, dag_run_id=self.dag_run_id)
 
 
 class TestJobsOperations:

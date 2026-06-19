@@ -91,6 +91,10 @@ TEST_COMMANDS = [
     "dags unpause example_bash_operator",
     # Dag Run commands
     'dagrun get example_bash_operator "manual__{date_param}"',
+    # Safe, non-destructive update (sets a note only; does not change run state
+    # or affect downstream xcom/taskinstance commands). clear/update-state and
+    # delete are covered by unit tests to avoid mutating shared run state/ordering.
+    'dagrun update example_bash_operator "manual__{date_param}" --note "updated by airflowctl integration test"',
     "dags update example_bash_operator --no-is-paused",
     # Dag Run commands
     "dagrun list --dag-id example_bash_operator --state success --limit=1",

@@ -39,6 +39,7 @@ from airflowctl.api.datamodels.generated import (
     BulkBodyPoolBody,
     BulkBodyVariableBody,
     BulkResponse,
+    ClearTaskInstanceCollectionResponse,
     Config,
     ConnectionBody,
     ConnectionCollectionResponse,
@@ -49,7 +50,9 @@ from airflowctl.api.datamodels.generated import (
     DAGDetailsResponse,
     DAGPatchBody,
     DAGResponse,
+    DAGRunClearBody,
     DAGRunCollectionResponse,
+    DAGRunPatchBody,
     DAGRunResponse,
     DagStatsCollectionResponse,
     DAGTagCollectionResponse,
@@ -642,6 +645,48 @@ class DagRunOperations(BaseOperations):
         try:
             self.response = self.client.get(f"/dags/{dag_id}/dagRuns", params=params)
             return DAGRunCollectionResponse.model_validate_json(self.response.content)
+        except ServerResponseError as e:
+            raise e
+
+    def clear(
+        self, dag_id: str, dag_run_id: str, dag_run_clear_body: DAGRunClearBody
+    ) -> ClearTaskInstanceCollectionResponse | DAGRunResponse | ServerResponseError:
+        """
+        Clear a dag run.
+
+        With ``dry_run`` (the default), the API returns the collection of task
+        instances that would be cleared. With ``dry_run=False`` it performs the
+        clear and returns the resulting dag run.
+        """
+        try:
+            self.response = self.client.post(
+                f"dags/{dag_id}/dagRuns/{dag_run_id}/clear",
+                content=dag_run_clear_body.model_dump_json(),
+            )
+            if dag_run_clear_body.dry_run:
+                return ClearTaskInstanceCollectionResponse.model_validate_json(self.response.content)
+            return DAGRunResponse.model_validate_json(self.response.content)
+        except ServerResponseError as e:
+            raise e
+
+    def update(
+        self, dag_id: str, dag_run_id: str, dag_run_patch_body: DAGRunPatchBody
+    ) -> DAGRunResponse | ServerResponseError:
+        """Update the state or note of a dag run."""
+        try:
+            self.response = self.client.patch(
+                f"dags/{dag_id}/dagRuns/{dag_run_id}",
+                content=dag_run_patch_body.model_dump_json(),
+            )
+            return DAGRunResponse.model_validate_json(self.response.content)
+        except ServerResponseError as e:
+            raise e
+
+    def delete(self, dag_id: str, dag_run_id: str) -> str | ServerResponseError:
+        """Delete a dag run."""
+        try:
+            self.client.delete(f"dags/{dag_id}/dagRuns/{dag_run_id}")
+            return dag_run_id
         except ServerResponseError as e:
             raise e
 
