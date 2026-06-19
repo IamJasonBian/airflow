@@ -68,6 +68,8 @@ from airflowctl.api.datamodels.generated import (
     ProviderCollectionResponse,
     QueuedEventCollectionResponse,
     QueuedEventResponse,
+    TaskCollectionResponse,
+    TaskResponse,
     TriggerDAGRunPostBody,
     VariableBody,
     VariableCollectionResponse,
@@ -923,5 +925,25 @@ class PluginsOperations(BaseOperations):
         try:
             self.response = self.client.get("plugins/importErrors")
             return PluginImportErrorCollectionResponse.model_validate_json(self.response.content)
+        except ServerResponseError as e:
+            raise e
+
+
+class TasksOperations(BaseOperations):
+    """Task operations (structural task metadata for a Dag)."""
+
+    def get(self, dag_id: str, task_id: str) -> TaskResponse | ServerResponseError:
+        """Get a task definition from the API server."""
+        try:
+            self.response = self.client.get(f"dags/{dag_id}/tasks/{task_id}")
+            return TaskResponse.model_validate_json(self.response.content)
+        except ServerResponseError as e:
+            raise e
+
+    def list(self, dag_id: str) -> TaskCollectionResponse | ServerResponseError:
+        """List all task definitions for a Dag from the API server."""
+        try:
+            self.response = self.client.get(f"dags/{dag_id}/tasks")
+            return TaskCollectionResponse.model_validate_json(self.response.content)
         except ServerResponseError as e:
             raise e

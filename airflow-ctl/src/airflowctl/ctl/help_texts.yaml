@@ -100,3 +100,7 @@ xcom:
 plugins:
   list: "List all installed Airflow plugins"
   list-import-errors: "List all plugin import errors"
+
+tasks:
+  list: "List all task definitions for a Dag"
+  get: "Retrieve a task definition by Dag ID and task ID"

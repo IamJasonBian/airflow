@@ -91,6 +91,8 @@ from airflowctl.api.datamodels.generated import (
     QueuedEventCollectionResponse,
     QueuedEventResponse,
     ReprocessBehavior,
+    TaskCollectionResponse,
+    TaskResponse,
     TriggerDAGRunPostBody,
     VariableBody,
     VariableCollectionResponse,
@@ -100,7 +102,7 @@ from airflowctl.api.datamodels.generated import (
     XComResponse,
     XComResponseNative,
 )
-from airflowctl.api.operations import BaseOperations
+from airflowctl.api.operations import BaseOperations, ServerResponseError
 from airflowctl.exceptions import AirflowCtlConnectionException
 
 if TYPE_CHECKING:
@@ -1955,3 +1957,50 @@ class TestPluginsOperations:
         client = make_api_client(transport=httpx.MockTransport(handle_request))
         response = client.plugins.list_import_errors()
         assert response == self.plugin_import_error_collection_response
+
+
+class TestTasksOperations:
+    dag_id = "example_bash_operator"
+    task_id = "runme_0"
+    task_response = TaskResponse(
+        task_id=task_id,
+        task_display_name=task_id,
+        owner="airflow",
+        trigger_rule="all_success",
+        depends_on_past=False,
+        wait_for_downstream=False,
+        retries=0,
+        retry_exponential_backoff=False,
+        extra_links=[],
+    )
+    task_collection_response = TaskCollectionResponse(
+        tasks=[task_response],
+        total_entries=1,
+    )
+
+    def test_get(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == f"/api/v2/dags/{self.dag_id}/tasks/{self.task_id}"
+            return httpx.Response(200, json=json.loads(self.task_response.model_dump_json()))
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.tasks.get(dag_id=self.dag_id, task_id=self.task_id)
+        assert response == self.task_response
+
+    def test_get_not_found(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == f"/api/v2/dags/{self.dag_id}/tasks/{self.task_id}"
+            return httpx.Response(404, json={"detail": f"Task with id {self.task_id} was not found"})
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        with pytest.raises(ServerResponseError):
+            client.tasks.get(dag_id=self.dag_id, task_id=self.task_id)
+
+    def test_list(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == f"/api/v2/dags/{self.dag_id}/tasks"
+            return httpx.Response(200, json=json.loads(self.task_collection_response.model_dump_json()))
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.tasks.list(dag_id=self.dag_id)
+        assert response == self.task_collection_response
