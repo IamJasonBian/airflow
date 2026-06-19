@@ -75,6 +75,8 @@ from airflowctl.api.datamodels.generated import (
     DAGWarningCollectionResponse,
     DAGWarningResponse,
     DagWarningType,
+    EventLogCollectionResponse,
+    EventLogResponse,
     ImportErrorCollectionResponse,
     ImportErrorResponse,
     JobCollectionResponse,
@@ -100,7 +102,7 @@ from airflowctl.api.datamodels.generated import (
     XComResponse,
     XComResponseNative,
 )
-from airflowctl.api.operations import BaseOperations
+from airflowctl.api.operations import BaseOperations, ServerResponseError
 from airflowctl.exceptions import AirflowCtlConnectionException
 
 if TYPE_CHECKING:
@@ -1272,6 +1274,54 @@ class TestDagRunOperations:
         assert response == self.dag_run_collection_response
         assert "state" not in captured_params
         assert captured_params["limit"] == "5"
+
+
+class TestEventLogsOperations:
+    event_log_response = EventLogResponse(
+        event_log_id=1,
+        when=datetime.datetime(2025, 1, 1, 0, 0, 0),
+        dag_id="dag_id",
+        task_id="task_id",
+        run_id="run_id",
+        map_index=-1,
+        try_number=1,
+        event="event",
+        logical_date=datetime.datetime(2025, 1, 1, 0, 0, 0),
+        owner="owner",
+        extra=None,
+    )
+    event_log_collection_response = EventLogCollectionResponse(
+        event_logs=[event_log_response],
+        total_entries=1,
+    )
+
+    def test_get(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v2/eventLogs/1"
+            return httpx.Response(200, json=json.loads(self.event_log_response.model_dump_json()))
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.event_logs.get(event_log_id="1")
+        assert response == self.event_log_response
+
+    def test_get_not_found(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v2/eventLogs/999"
+            return httpx.Response(404, json={"detail": "The Event Log with id: `999` not found"})
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        with pytest.raises(ServerResponseError):
+            client.event_logs.get(event_log_id="999")
+
+    def test_list(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v2/eventLogs"
+            assert dict(request.url.params)["limit"] == "50"
+            return httpx.Response(200, json=json.loads(self.event_log_collection_response.model_dump_json()))
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.event_logs.list()
+        assert response == self.event_log_collection_response
 
 
 class TestJobsOperations:

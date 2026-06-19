@@ -51,6 +51,7 @@ from airflowctl.api.operations import (
     ConnectionsOperations,
     DagRunOperations,
     DagsOperations,
+    EventLogsOperations,
     JobsOperations,
     LoginOperations,
     PluginsOperations,
@@ -430,6 +431,12 @@ class Client(httpx.Client):
     def dag_runs(self):
         """Operations related to Dag runs."""
         return DagRunOperations(self)
+
+    @lru_cache()  # type: ignore[prop-decorator]
+    @property
+    def event_logs(self):
+        """Operations related to event logs."""
+        return EventLogsOperations(self)
 
     @lru_cache()  # type: ignore[prop-decorator]
     @property

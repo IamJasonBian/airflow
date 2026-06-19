@@ -56,6 +56,8 @@ from airflowctl.api.datamodels.generated import (
     DAGVersionCollectionResponse,
     DagVersionResponse,
     DAGWarningCollectionResponse,
+    EventLogCollectionResponse,
+    EventLogResponse,
     ImportErrorCollectionResponse,
     ImportErrorResponse,
     JobCollectionResponse,
@@ -644,6 +646,22 @@ class DagRunOperations(BaseOperations):
             return DAGRunCollectionResponse.model_validate_json(self.response.content)
         except ServerResponseError as e:
             raise e
+
+
+class EventLogsOperations(BaseOperations):
+    """Event log operations."""
+
+    def get(self, event_log_id: str) -> EventLogResponse | ServerResponseError:
+        """Get an event log."""
+        try:
+            self.response = self.client.get(f"eventLogs/{event_log_id}")
+            return EventLogResponse.model_validate_json(self.response.content)
+        except ServerResponseError as e:
+            raise e
+
+    def list(self) -> EventLogCollectionResponse | ServerResponseError:
+        """List all event logs."""
+        return super().execute_list(path="eventLogs", data_model=EventLogCollectionResponse)
 
 
 class JobsOperations(BaseOperations):
