@@ -66,6 +66,7 @@ from airflowctl.api.datamodels.generated import (
     DagRunState,
     DagRunTriggeredByType,
     DagRunType,
+    DAGSourceResponse,
     DagStatsCollectionResponse,
     DagStatsResponse,
     DagStatsStateResponse,
@@ -100,7 +101,7 @@ from airflowctl.api.datamodels.generated import (
     XComResponse,
     XComResponseNative,
 )
-from airflowctl.api.operations import BaseOperations
+from airflowctl.api.operations import BaseOperations, ServerResponseError
 from airflowctl.exceptions import AirflowCtlConnectionException
 
 if TYPE_CHECKING:
@@ -912,6 +913,13 @@ class TestDagOperations:
         is_stale=False,
     )
 
+    dag_source_response = DAGSourceResponse(
+        dag_id=dag_id,
+        content="print('hello world')",
+        version_number=1,
+        dag_display_name=dag_display_name,
+    )
+
     dag_tag_collection_response = DAGTagCollectionResponse(
         tags=["tag"],
         total_entries=1,
@@ -1033,6 +1041,24 @@ class TestDagOperations:
         client = make_api_client(transport=httpx.MockTransport(handle_request))
         response = client.dags.get_details("dag_id")
         assert response == self.dag_details_response
+
+    def test_get_source(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v2/dagSources/dag_id"
+            return httpx.Response(200, json=json.loads(self.dag_source_response.model_dump_json()))
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.dags.get_source("dag_id")
+        assert response == self.dag_source_response
+
+    def test_get_source_not_found(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v2/dagSources/dag_id"
+            return httpx.Response(404, json={"detail": "Not Found"})
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        with pytest.raises(ServerResponseError):
+            client.dags.get_source("dag_id")
 
     def test_get_tags(self):
         def handle_request(request: httpx.Request) -> httpx.Response:

@@ -51,6 +51,7 @@ from airflowctl.api.datamodels.generated import (
     DAGResponse,
     DAGRunCollectionResponse,
     DAGRunResponse,
+    DAGSourceResponse,
     DagStatsCollectionResponse,
     DAGTagCollectionResponse,
     DAGVersionCollectionResponse,
@@ -526,6 +527,14 @@ class DagsOperations(BaseOperations):
         try:
             self.response = self.client.get(f"dags/{dag_id}/details")
             return DAGDetailsResponse.model_validate_json(self.response.content)
+        except ServerResponseError as e:
+            raise e
+
+    def get_source(self, dag_id: str) -> DAGSourceResponse | ServerResponseError:
+        """Get the source code of a Dag."""
+        try:
+            self.response = self.client.get(f"dagSources/{dag_id}")
+            return DAGSourceResponse.model_validate_json(self.response.content)
         except ServerResponseError as e:
             raise e
 

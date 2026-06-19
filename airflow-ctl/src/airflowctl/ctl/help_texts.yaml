@@ -54,6 +54,7 @@ connections:
 dags:
   get: "Retrieve a Dag by its ID"
   get-details: "Retrieve detailed information for a Dag"
+  get-source: "Retrieve the source code of a Dag"
   get-tags: "List all tags used across Dags"
   list: "List all Dags"
   update: "Update properties of a Dag"

@@ -77,6 +77,7 @@ TEST_COMMANDS = [
     "dags list",
     "dags get example_bash_operator",
     "dags get-details example_bash_operator",
+    "dags get-source example_bash_operator",
     "dags get-stats example_bash_operator",
     "dags get-version example_bash_operator 1",
     "dags list-import-errors",
