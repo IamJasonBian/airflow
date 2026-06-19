@@ -56,6 +56,7 @@ from airflowctl.api.datamodels.generated import (
     DAGVersionCollectionResponse,
     DagVersionResponse,
     DAGWarningCollectionResponse,
+    HealthInfoResponse,
     ImportErrorCollectionResponse,
     ImportErrorResponse,
     JobCollectionResponse,
@@ -665,6 +666,18 @@ class JobsOperations(BaseOperations):
             params["is_alive"] = is_alive
 
         return super().execute_list(path="jobs", data_model=JobCollectionResponse, params=params)
+
+
+class MonitorOperations(BaseOperations):
+    """Monitor operations."""
+
+    def get_health(self) -> HealthInfoResponse | ServerResponseError:
+        """Get the health of the API server."""
+        try:
+            self.response = self.client.get("monitor/health")
+            return HealthInfoResponse.model_validate_json(self.response.content)
+        except ServerResponseError as e:
+            raise e
 
 
 class PoolsOperations(BaseOperations):

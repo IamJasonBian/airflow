@@ -102,6 +102,8 @@ TEST_COMMANDS = [
     'xcom delete example_bash_operator "manual__{date_param}" runme_0 {xcom_key}',
     # Jobs commands
     "jobs list",
+    # Monitor commands
+    "monitor get-health",
     # Pools commands
     "pools create --name=test_pool --slots=5",
     "pools list",

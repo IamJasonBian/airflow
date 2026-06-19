@@ -53,6 +53,7 @@ from airflowctl.api.operations import (
     DagsOperations,
     JobsOperations,
     LoginOperations,
+    MonitorOperations,
     PluginsOperations,
     PoolsOperations,
     ProvidersOperations,
@@ -436,6 +437,12 @@ class Client(httpx.Client):
     def jobs(self):
         """Operations related to jobs."""
         return JobsOperations(self)
+
+    @lru_cache()  # type: ignore[prop-decorator]
+    @property
+    def monitor(self):
+        """Operations related to monitoring."""
+        return MonitorOperations(self)
 
     @lru_cache()  # type: ignore[prop-decorator]
     @property

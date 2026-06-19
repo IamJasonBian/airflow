@@ -73,6 +73,9 @@ dagrun:
 jobs:
   list: "List scheduler, triggerer, and other Airflow jobs"
 
+monitor:
+  get-health: "Retrieve the health status of Airflow components"
+
 pools:
   get: "Retrieve a pool by its name"
   list: "List all pools"

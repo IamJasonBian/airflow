@@ -43,6 +43,7 @@ COMMANDS = [
     "dags",
     "dagrun",
     "jobs",
+    "monitor",
     "pools",
     "providers",
     "variables",

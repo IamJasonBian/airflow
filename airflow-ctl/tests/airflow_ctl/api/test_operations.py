@@ -39,6 +39,7 @@ from airflowctl.api.datamodels.generated import (
     BackfillCollectionResponse,
     BackfillPostBody,
     BackfillResponse,
+    BaseInfoResponse,
     BulkActionOnExistence,
     BulkActionResponse,
     BulkBodyConnectionBody,
@@ -75,6 +76,7 @@ from airflowctl.api.datamodels.generated import (
     DAGWarningCollectionResponse,
     DAGWarningResponse,
     DagWarningType,
+    HealthInfoResponse,
     ImportErrorCollectionResponse,
     ImportErrorResponse,
     JobCollectionResponse,
@@ -91,7 +93,9 @@ from airflowctl.api.datamodels.generated import (
     QueuedEventCollectionResponse,
     QueuedEventResponse,
     ReprocessBehavior,
+    SchedulerInfoResponse,
     TriggerDAGRunPostBody,
+    TriggererInfoResponse,
     VariableBody,
     VariableCollectionResponse,
     VariableResponse,
@@ -1336,6 +1340,29 @@ class TestJobsOperations:
         client = make_api_client(transport=httpx.MockTransport(handle_request))
         response = client.jobs.list(job_type=job_type, hostname=hostname, is_alive=is_alive)
         assert response == self.job_collection_response
+
+
+class TestMonitorOperations:
+    health_info_response = HealthInfoResponse(
+        metadatabase=BaseInfoResponse(status="healthy"),
+        scheduler=SchedulerInfoResponse(
+            status="healthy",
+            latest_scheduler_heartbeat="2025-01-01T00:00:00Z",
+        ),
+        triggerer=TriggererInfoResponse(
+            status="healthy",
+            latest_triggerer_heartbeat="2025-01-01T00:00:00Z",
+        ),
+    )
+
+    def test_get_health(self):
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v2/monitor/health"
+            return httpx.Response(200, json=self.health_info_response.model_dump(mode="json"))
+
+        client = make_api_client(transport=httpx.MockTransport(handle_request))
+        response = client.monitor.get_health()
+        assert response == self.health_info_response
 
 
 class TestPoolsOperations:
