@@ -97,7 +97,7 @@ from airflow.models.connection_test import (
     ConnectionTestState,
 )
 from airflow.models.dag import DagModel
-from airflow.models.dag_version import DagVersion
+from airflow.models.dag_version import DagVersion, _resolve_version_data
 from airflow.models.dagbag import DBDagBag
 from airflow.models.dagbundle import DagBundleModel
 from airflow.models.dagrun import DagRun
@@ -684,6 +684,12 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                     ranked_query.c.map_index_for_ordering,
                 )
                 .options(selectinload(TI.dag_model))
+                # Eager-load dag_version: TIs become transient (via make_transient) before
+                # ExecuteTask.make() reads ti.dag_version.version_data. Lazy loads on
+                # transient objects silently return None instead of raising DetachedInstanceError.
+                # Scope the second SELECT to version_data (the PK is auto-included) so we read
+                # two columns rather than the full DagVersion row.
+                .options(selectinload(TI.dag_version).load_only(DagVersion.version_data))
             )
 
             query = query.limit(max_tis)
@@ -1248,12 +1254,21 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
         return conf.getboolean("traces", "otel_on")
 
     def _process_executor_events(self, executor: BaseExecutor, session: Session) -> int:
-        return SchedulerJobRunner.process_executor_events(
-            executor=executor,
-            job_id=self.job.id,
-            scheduler_dag_bag=self.scheduler_dag_bag,
-            session=session,
-        )
+        try:
+            return SchedulerJobRunner.process_executor_events(
+                executor=executor,
+                job_id=self.job.id,
+                scheduler_dag_bag=self.scheduler_dag_bag,
+                session=session,
+            )
+        except Exception as exc:
+            stats.incr("scheduler.executor_events.failed", tags={"exception_class": type(exc).__name__})
+            raise
+
+    @staticmethod
+    def _emit_executor_events_batch_metrics(num_events: int) -> None:
+        stats.gauge("scheduler.executor_events.batch_size", num_events)
+        stats.incr("scheduler.executor_events.processed", num_events)
 
     @classmethod
     def process_executor_events(
@@ -1291,6 +1306,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
         """
         ti_primary_key_to_try_number_map: dict[tuple[str, str, str, int], int] = {}
         event_buffer = executor.get_event_buffer()
+        num_events = len(event_buffer)
         tis_with_right_state: list[TaskInstanceKey] = []
         callback_keys_with_events: list[CallbackKey] = []
 
@@ -1352,11 +1368,13 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
 
         # Return if no finished tasks
         if not tis_with_right_state:
+            cls._emit_executor_events_batch_metrics(num_events)
             return len(event_buffer)
 
         # Check state of finished tasks
         filter_for_tis = TI.filter_for_tis(tis_with_right_state)
         if filter_for_tis is None:
+            cls._emit_executor_events_batch_metrics(num_events)
             return len(event_buffer)
         asset_loader, alias_loader = _eager_load_dag_run_for_validation()
         query = (
@@ -1433,6 +1451,8 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
             # or the TI is queued by another job. Either ways we should not fail it.
             # 3) the trigger already put the TI back to scheduled (resume after defer) but the executor success
             # from the worker exit after defer() has not been processed yet - should not fail it.
+            # 4) the trigger already put the TI back to queued (resume after defer) but the executor success
+            # from the worker exit after defer() has not been processed yet - should not fail it.
 
             # All of this could also happen if the state is "running",
             # but that is handled by the scheduler detecting task instances without heartbeats.
@@ -1447,9 +1467,9 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                 ti.queued_by_job_id != job_id  # Another scheduler has queued this task again
                 or executor.has_task(ti)  # This scheduler has this task already
                 or (
-                    # Resume-after-defer: trigger moved TI to scheduled (next_method set) before we saw the
-                    # executor success from the defer exit for the same try_number.
-                    ti.state == TaskInstanceState.SCHEDULED
+                    # Resume-after-defer: trigger moved TI to scheduled or queued (next_method set)
+                    # before we saw the executor success from the defer exit for the same try_number.
+                    ti.state in (TaskInstanceState.SCHEDULED, TaskInstanceState.QUEUED)
                     and state == TaskInstanceState.SUCCESS
                     and ti.next_method is not None
                 )
@@ -1506,6 +1526,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                         if ti.dag_version and ti.dag_run.bundle_version is not None
                         else ti.dag_run.bundle_version
                     )
+                    _version_data = _resolve_version_data(ti.dag_version, ti.dag_run.bundle_version)
                     # Backfill dag_version_id for legacy tasks (Pydantic requires uuid.UUID).
                     if not _ensure_ti_has_dag_version_id(ti, session, cls.logger()):
                         continue
@@ -1513,6 +1534,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                         filepath=ti.dag_model.relative_fileloc or "",
                         bundle_name=_bundle_name,
                         bundle_version=_bundle_version,
+                        version_data=_version_data,
                         ti=ti,
                         msg=msg,
                         task_callback_type=(
@@ -1555,6 +1577,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                     _email_bundle_version = (
                         ti.dag_version.bundle_version if ti.dag_version else ti.dag_run.bundle_version
                     )
+                    _email_version_data = _resolve_version_data(ti.dag_version, ti.dag_run.bundle_version)
                     # Backfill dag_version_id for legacy tasks (Pydantic requires uuid.UUID).
                     if not _ensure_ti_has_dag_version_id(ti, session, cls.logger()):
                         continue
@@ -1562,6 +1585,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                         filepath=ti.dag_model.relative_fileloc or "",
                         bundle_name=_email_bundle_name,
                         bundle_version=_email_bundle_version,
+                        version_data=_email_version_data,
                         ti=ti,
                         msg=msg,
                         email_type="retry" if ti.is_eligible_to_retry() else "failure",
@@ -1578,6 +1602,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                 # Update task state - emails are handled by DAG processor now
                 ti.handle_failure(error=msg, session=session)
 
+        cls._emit_executor_events_batch_metrics(num_events)
         return len(event_buffer)
 
     def _execute(self) -> int | None:
@@ -1613,7 +1638,8 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
 
             if settings.Session is not None:
                 settings.Session.remove()
-        except Exception:
+        except Exception as exc:
+            stats.incr("scheduler.loop_exceptions", tags={"exception_class": type(exc).__name__})
             self.log.exception("Exception when executing SchedulerJob._run_scheduler_loop")
             raise
         finally:
@@ -2044,13 +2070,15 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
         asset_infos: Iterable[tuple[str, str]],
         partition_key: str,
         dag_id: str,
+        carried_partition_date: datetime | None,
     ) -> datetime | None:
         """
-        Return the temporal anchor (period-start datetime) for *partition_key*.
+        Return the ``partition_date`` the consumer Dag run should be created with.
 
-        Resolves the temporal anchor (period-start datetime) for *partition_key*
-        across *asset_infos* — the ``(name, uri)`` pairs of the upstream assets
-        that contributed to it. Each upstream mapper resolves the key via
+        The temporal anchor (period-start datetime) is resolved for
+        *partition_key* across *asset_infos* — the ``(name, uri)`` pairs of the
+        upstream assets that contributed to it. Each upstream mapper resolves the
+        key via
         :meth:`~airflow.partition_mappers.base.PartitionMapper.to_partition_date`:
         temporal mappers decode the key, composite mappers delegate to their
         child, and non-temporal mappers (e.g.
@@ -2059,16 +2087,19 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
         A partitioned consumer has a single partition identity, so every temporal
         mapper feeding it must resolve the same key to the same instant. Anchors
         are compared by instant (timezone-aware), so equivalent moments collapse
-        to one. When the temporal mappers agree, that anchor is returned; when
-        they disagree — a misconfiguration, e.g. assets mapping the same key under
-        different timezones — ``partition_date`` is left unset and a warning is
-        logged rather than silently picking one by scan order. Returns ``None`` if
-        no mapper is temporal.
+        to one. When the temporal mappers agree, that anchor is returned.
 
-        A failure in any mapper aborts the whole resolution and returns ``None``
-        (logged) — anchors accumulated from earlier mappers are discarded rather
-        than used as a partial result, since a partial set could hide a conflict.
-        A broken mapper must not crash the scheduler tick.
+        When no temporal mapper contributes at all — an identity key carries no
+        temporal meaning and cannot be decoded back into a date — the producer's
+        source date carried on the APDR at queue time (*carried_partition_date*,
+        set only for ``IdentityMapper``) is returned instead.
+
+        When temporal mappers were present but produced no usable anchor — they
+        disagreed (a misconfiguration, e.g. assets mapping the same key under
+        different timezones) or one raised — the conflict/error is logged and
+        ``None`` is returned. The carried date is deliberately *not* substituted
+        here: stamping it would mask the logged suppression. A broken mapper must
+        not crash the scheduler tick.
         """
         anchors: set[datetime] = set()
         try:
@@ -2086,7 +2117,12 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
             return None
 
         if not anchors:
-            return None
+            # No temporal mapper contributed an anchor (e.g. an all-IdentityMapper feed),
+            # so fall back to the date carried on the APDR. A partitioned consumer's feeding
+            # assets are expected to agree on the partition's datetime; when a temporal mapper
+            # *does* resolve an anchor it takes precedence over the carried identity date,
+            # since the key is the authoritative source the scheduler can re-derive.
+            return carried_partition_date
         if len(anchors) > 1:
             self.log.warning(
                 "Upstream partition mappers resolved conflicting partition_date values for the same "
@@ -2288,6 +2324,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                     asset_infos=asset_info_per_apdr[apdr.id].values(),
                     partition_key=apdr.partition_key,
                     dag_id=apdr.target_dag_id,
+                    carried_partition_date=apdr.partition_date,
                 )
             dag_run = dag.create_dagrun(
                 run_id=DagRun.generate_run_id(
@@ -2394,11 +2431,6 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
             .all()
         )
         existing_dagruns = {(x.dag_id, x.logical_date): x for x in existing_dagrun_objects}
-
-        # todo: AIP-76 we may want to update check existing to also check partitioned dag runs,
-        #  but the thing is, there is not actually a restriction that
-        #  we don't create new runs with the same partition key
-        #  so it's unclear whether we should / need to.
 
         # backfill runs are not created by scheduler and their concurrency is separate
         # so we exclude them here
@@ -2575,6 +2607,18 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                 .cte()
             )
 
+            # A first asset-triggered run has no previous run to floor the event window. With
+            # catchup off, floor it at when the Dag started scheduling on its assets so the
+            # backlog is skipped; with catchup on, only date.min applies and the backlog replays.
+            event_window_floor: list[Any] = [cte.c.previous_dag_run_run_after]
+            if not dag.catchup:
+                event_window_floor.append(
+                    select(func.min(DagScheduleAssetReference.created_at))
+                    .where(DagScheduleAssetReference.dag_id == dag.dag_id)
+                    .scalar_subquery()
+                )
+            event_window_floor.append(date.min)
+
             asset_events = list(
                 session.scalars(
                     select(AssetEvent)
@@ -2592,7 +2636,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                             ),
                         ),
                         AssetEvent.timestamp <= triggered_date,
-                        AssetEvent.timestamp > func.coalesce(cte.c.previous_dag_run_run_after, date.min),
+                        AssetEvent.timestamp > func.coalesce(*event_window_floor),
                     )
                     .order_by(AssetEvent.timestamp.asc(), AssetEvent.id.asc())
                 )
@@ -3056,6 +3100,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                         if ti.dag_version and ti.dag_run.bundle_version is not None
                         else ti.dag_run.bundle_version
                     )
+                    _stuck_version_data = _resolve_version_data(ti.dag_version, ti.dag_run.bundle_version)
                     # Backfill dag_version_id for legacy tasks (Pydantic requires uuid.UUID).
                     # Note: we cannot use `continue` here because this method is not
                     # inside a loop.  If backfilling fails we simply skip the callback.
@@ -3064,6 +3109,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                             filepath=ti.dag_model.relative_fileloc or "",
                             bundle_name=_stuck_bundle_name,
                             bundle_version=_stuck_bundle_version,
+                            version_data=_stuck_version_data,
                             ti=ti,
                             msg=msg,
                             context_from_server=TIRunContext(
@@ -3321,7 +3367,6 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
 
                     stats.incr("scheduler.orphaned_tasks.cleared", len(to_reset))
                     stats.incr("scheduler.orphaned_tasks.adopted", len(tis_to_adopt_or_reset) - len(to_reset))
-
                     if to_reset:
                         task_instance_str = "\n\t".join(reset_tis_message)
                         self.log.info(
@@ -3469,6 +3514,11 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
             if task_instances_without_heartbeats := self._find_task_instances_without_heartbeats(
                 session=session
             ):
+                stats.incr(
+                    "scheduler.zombies.detected",
+                    len(task_instances_without_heartbeats),
+                    tags={"reason": "heartbeat_timeout"},
+                )
                 self._purge_task_instances_without_heartbeats(
                     task_instances_without_heartbeats, session=session
                 )
@@ -3527,6 +3577,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                 if ti.dag_version and ti.dag_run.bundle_version is not None
                 else ti.dag_run.bundle_version
             )
+            _hb_version_data = _resolve_version_data(ti.dag_version, ti.dag_run.bundle_version)
             # Backfill dag_version_id for legacy tasks (Pydantic requires uuid.UUID).
             if not _ensure_ti_has_dag_version_id(ti, session, self.log):
                 continue
@@ -3534,6 +3585,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                 filepath=ti.dag_model.relative_fileloc or "",
                 bundle_name=_hb_bundle_name,
                 bundle_version=_hb_bundle_version,
+                version_data=_hb_version_data,
                 ti=ti,
                 msg=str(task_instance_heartbeat_timeout_message_details),
                 context_from_server=TIRunContext(
