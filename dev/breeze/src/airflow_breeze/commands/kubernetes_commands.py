@@ -51,6 +51,7 @@ from airflow_breeze.global_constants import (
     ALLOWED_EXECUTORS,
     ALLOWED_KUBERNETES_VERSIONS,
     ALLOWED_LOG_LEVELS,
+    APACHE_AIRFLOW_GITHUB_REPOSITORY,
     CELERY_EXECUTOR,
     DEFAULT_ALLOWED_EXECUTOR,
     DEFAULT_LOG_LEVEL,
@@ -628,6 +629,17 @@ def check_if_base_image_exists(params: BuildProdParams) -> bool:
     return check_if_image_exists(image=params.airflow_image_name)
 
 
+def _get_prod_image_params(python: str, **kwargs) -> BuildProdParams:
+    # K8S commands do not expose --github-repository, so honor the GITHUB_REPOSITORY
+    # variable set in CI - forks build and load their PROD image under their own
+    # registry path, not ghcr.io/apache/airflow.
+    return BuildProdParams(
+        python=python,
+        github_repository=os.environ.get("GITHUB_REPOSITORY", APACHE_AIRFLOW_GITHUB_REPOSITORY),
+        **kwargs,
+    )
+
+
 def _rebuild_k8s_image(
     python: str,
     rebuild_base_image: bool,
@@ -635,7 +647,7 @@ def _rebuild_k8s_image(
     use_uv: bool,
     output: Output | None,
 ) -> tuple[int, str]:
-    params = BuildProdParams(python=python, use_uv=use_uv)
+    params = _get_prod_image_params(python, use_uv=use_uv)
     if rebuild_base_image:
         run_build_production_image(
             prod_image_params=params,
@@ -687,7 +699,7 @@ ENV GUNICORN_CMD_ARGS='--preload'
 
 
 def _upload_k8s_image(python: str, kubernetes_version: str, output: Output | None) -> tuple[int, str]:
-    params = BuildProdParams(python=python)
+    params = _get_prod_image_params(python)
     cluster_name = get_kind_cluster_name(python=python, kubernetes_version=kubernetes_version)
     get_console(output=output).print(
         f"[info]Uploading Airflow image {params.airflow_image_kubernetes} to cluster {cluster_name}"
@@ -973,7 +985,7 @@ def _build_skaffold_config(
 ) -> dict[str, Any]:
     from packaging.version import Version
 
-    params = BuildProdParams(python=python)
+    params = _get_prod_image_params(python)
     use_flask_appbuilder = Version(python) < Version("3.13")
     auth_manager = (
         "airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager"
@@ -1332,7 +1344,7 @@ def _deploy_helm_chart(
         shutil.copytree(CHART_PATH, os.fspath(tmp_chart_path), ignore_dangling_symlinks=True)
         get_console(output=output).print(f"[info]Copied chart sources to {tmp_chart_path}")
         kubectl_context = get_kubectl_cluster_name(python=python, kubernetes_version=kubernetes_version)
-        params = BuildProdParams(python=python)
+        params = _get_prod_image_params(python)
         # TODO (potiuk): we can also run on matrix of auth managers if we make SimpleAuthManager prod-ready ?
         use_flask_appbuilder = Version(python) < Version("3.13")
         if use_flask_appbuilder:
