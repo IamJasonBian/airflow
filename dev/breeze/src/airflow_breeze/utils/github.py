@@ -23,9 +23,9 @@ import sys
 import tempfile
 import zipfile
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from rich.markup import escape
 
@@ -159,7 +159,7 @@ def log_github_rate_limit_error(response: Response) -> None:
     remaining_int = int(remaining) if remaining and remaining.isdigit() else None
 
     if reset and reset.isdigit():
-        reset_dt = datetime.fromtimestamp(int(reset), tz=timezone.utc)
+        reset_dt = datetime.fromtimestamp(int(reset), tz=UTC)
         reset_time = reset_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
     else:
         reset_time = "unknown"
@@ -253,7 +253,9 @@ def get_active_airflow_versions(
     repo = Repo(AIRFLOW_ROOT_PATH)
     all_active_tags: list[str] = []
     try:
-        ref_tags = repo.git.ls_remote("--tags", remote_name).splitlines()
+        # `git.ls_remote` is typed as returning the full union of git-command return shapes;
+        # with plain args it is always the command output.
+        ref_tags = cast("str", repo.git.ls_remote("--tags", remote_name)).splitlines()
     except GitCommandError as ex:
         console_print(
             f"[error]Could not fetch tags from `{remote_name}` remote! Make sure to have it configured.\n"
@@ -278,7 +280,7 @@ def get_active_airflow_versions(
     for version in airflow_versions:
         date = get_tag_date(version)
         if not date:
-            console_print("[error]Error fetching tag date for Airflow {version}")
+            console_print(f"[error]Error fetching tag date for Airflow {version}")
             sys.exit(1)
         airflow_release_dates[version] = date
     console_print("[info]All Airflow 2/3 versions loaded from GitHub[/]")
@@ -340,7 +342,7 @@ def get_tag_date(tag: str) -> str | None:
     timestamp: int = (
         tag_object.committed_date if hasattr(tag_object, "committed_date") else tag_object.tagged_date
     )
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.fromtimestamp(timestamp, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def download_artifact_from_run_id(run_id: str, output_file: Path, github_repository: str, github_token: str):

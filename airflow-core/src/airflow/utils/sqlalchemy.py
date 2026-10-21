@@ -24,8 +24,9 @@ import json
 import logging
 from collections.abc import Generator
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
-from sqlalchemy import TIMESTAMP, PickleType, String, event, nullsfirst, text
+from sqlalchemy import TIMESTAMP, PickleType, String, Uuid, event, nullsfirst, text
 from sqlalchemy.dialects import mysql
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
@@ -51,6 +52,9 @@ if TYPE_CHECKING:
 
     from airflow.typing_compat import Self
 
+    # TODO: use Select[UUID] once the minimum SQLAlchemy is 2.1; 2.0 uses Select[tuple[UUID]].
+    UUIDSelect = Select
+
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +64,58 @@ def get_dialect_name(session: Session) -> str | None:
     if (bind := session.get_bind()) is None:
         raise ValueError("No bind/engine is associated with the provided Session")
     return getattr(bind.dialect, "name", None)
+
+
+@contextlib.contextmanager
+def apply_regex_query_timeout(session: Session) -> Generator[None, None, None]:
+    """
+    Bound the runtime of a user-supplied regex filter, scoped to the wrapped query.
+
+    Reads the ``[api] regexp_query_timeout`` config (in seconds, fractional values allowed) and sets
+    a database-side timeout for the duration of the ``with`` block, then restores the previous value
+    so it does not affect any other statement running later in the same transaction/session:
+
+    * PostgreSQL: transaction-local ``statement_timeout`` (via ``set_config(..., is_local=True)``).
+    * MySQL: session ``max_execution_time`` (applies to read-only ``SELECT`` statements).
+
+    The previous value is captured and restored (rather than reset to ``0``) so a server- or
+    role-level global timeout is preserved instead of being cleared. This is a ReDoS safeguard: a
+    malicious pattern is aborted instead of pinning a database backend. No-op on other backends
+    (e.g. SQLite) and when the configured timeout is ``0`` (which also means regexp filtering is
+    disabled).
+    """
+    timeout_seconds = conf.getfloat("api", "regexp_query_timeout")
+    if timeout_seconds <= 0:
+        yield
+        return
+    # ``timeout_ms`` is derived from the (operator-controlled) config, not from user input.
+    timeout_ms = int(timeout_seconds * 1000)
+    dialect_name = get_dialect_name(session)
+    if dialect_name == "postgresql":
+        previous = session.execute(text("SELECT current_setting('statement_timeout')")).scalar()
+        session.execute(
+            text("SELECT set_config('statement_timeout', :timeout, true)").bindparams(timeout=str(timeout_ms))
+        )
+        try:
+            yield
+        finally:
+            # Restore the previous value (e.g. a global statement_timeout) instead of clearing it, so
+            # the bound only applies to the regexp query and not later statements in the transaction.
+            session.execute(
+                text("SELECT set_config('statement_timeout', :timeout, true)").bindparams(
+                    timeout=str(previous) if previous is not None else "0"
+                )
+            )
+    elif dialect_name == "mysql":
+        previous = session.execute(text("SELECT @@SESSION.max_execution_time")).scalar()
+        session.execute(text(f"SET SESSION max_execution_time = {timeout_ms}"))
+        try:
+            yield
+        finally:
+            # Restore the previous value so a global max_execution_time is preserved.
+            session.execute(text(f"SET SESSION max_execution_time = {int(previous or 0)}"))
+    else:
+        yield
 
 
 def build_upsert_stmt(
@@ -177,7 +233,9 @@ def _default_json_contains(element, compiler, **kw):
 
     clauses = []
     for k, v in element.kv_dict.items():
-        path = f"$.{k}"
+        # Quote the key (json.dumps also covers embedded quotes/backslashes) so metacharacters
+        # like "." match literally, as PostgreSQL ``@>`` and MySQL ``JSON_CONTAINS`` do.
+        path = f"$.{json.dumps(k, ensure_ascii=False)}"
         clauses.append(func.json_extract(element.column, literal(path)) == literal(v))
     if len(clauses) == 1:
         return compiler.process(clauses[0], **kw)
@@ -235,6 +293,60 @@ class UtcDateTime(TypeDecorator):
         if dialect.name == "mysql":
             return mysql.TIMESTAMP(fsp=6)
         return super().load_dialect_impl(dialect)
+
+
+_MYSQL_DIALECT_NAMES = ("mysql", "mariadb")
+
+
+class CompactUUID(TypeDecorator):
+    """
+    A UUID that MySQL stores as ``BINARY(16)``; other dialects use SQLAlchemy's :class:`~sqlalchemy.types.Uuid`.
+
+    The default MySQL form, ``CHAR(32)``, takes 128 bytes in an index key under a utf8mb4 collation.
+    Keys that already approach InnoDB's 3072-byte limit, such as those holding several ``StringID`` columns,
+    overflow with it.
+    """
+
+    impl = Uuid
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name in _MYSQL_DIALECT_NAMES:
+            return dialect.type_descriptor(mysql.BINARY(16))
+        return dialect.type_descriptor(Uuid())
+
+    def process_bind_param(self, value, dialect):
+        if value is None or dialect.name not in _MYSQL_DIALECT_NAMES:
+            return value
+        return (UUID(value) if isinstance(value, str) else value).bytes
+
+    def process_result_value(self, value, dialect):
+        if value is None or dialect.name not in _MYSQL_DIALECT_NAMES:
+            return value
+        return UUID(bytes=bytes(value))
+
+
+class compact_uuid_default(ColumnElement):
+    """Server default for a :class:`CompactUUID` column, rendered in the form each dialect stores."""
+
+    inherit_cache = True
+    type = NullType()
+
+    def __init__(self, value: UUID):
+        self.value = value
+
+
+@compiles(compact_uuid_default)
+def _compact_uuid_default(element, compiler, **kw):
+    return compiler.render_literal_value(element.value.hex, String())
+
+
+@compiles(compact_uuid_default, "mysql")
+@compiles(compact_uuid_default, "mariadb")
+def _compact_uuid_default_mysql(element, compiler, **kw):
+    # SQLAlchemy only parenthesizes expression defaults when it knows the server version, which offline SQL
+    # generation (--show-sql-only) does not; MySQL rejects an unparenthesized expression default.
+    return f"(UNHEX({compiler.render_literal_value(element.value.hex, String())}))"
 
 
 class ExtendedJSON(TypeDecorator):
@@ -573,6 +685,9 @@ def with_db_lock_timeout(session: Session, lock_timeout: int = 30) -> Generator[
             session.execute(text(f"SET SESSION innodb_lock_wait_timeout = {old_mysql_timeout}"))
 
 
+PROHIBIT_COMMIT_ERROR_MESSAGE = "UNEXPECTED COMMIT - THIS WILL BREAK HA LOCKS!"
+
+
 class CommitProhibitorGuard:
     """Context manager class that powers prohibit_commit."""
 
@@ -581,11 +696,18 @@ class CommitProhibitorGuard:
     def __init__(self, session: Session):
         self.session = session
 
-    def _validate_commit(self, _):
+    def _validate_commit(self, session):
+        # before_commit fires for a SAVEPOINT release too, not just session.commit(). A
+        # savepoint release ends neither the outer transaction nor its row locks, so it can't
+        # break the HA locks this guard protects -- skip the check while one is open. This
+        # covers session.commit() and savepoint exits; nothing under this guard commits a
+        # transaction handle directly today, which would bypass this check.
+        if session.in_nested_transaction():
+            return
         if self.expected_commit:
             self.expected_commit = False
             return
-        raise RuntimeError("UNEXPECTED COMMIT - THIS WILL BREAK HA LOCKS!")
+        raise RuntimeError(PROHIBIT_COMMIT_ERROR_MESSAGE)
 
     def __enter__(self) -> Self:
         event.listen(self.session, "before_commit", self._validate_commit)

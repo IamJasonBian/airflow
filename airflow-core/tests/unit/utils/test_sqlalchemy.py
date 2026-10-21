@@ -21,11 +21,14 @@ import datetime
 import pickle
 from copy import deepcopy
 from unittest import mock
+from uuid import UUID
 
 import pytest
 from kubernetes.client import Configuration, models as k8s
-from sqlalchemy import text
+from sqlalchemy import Column, MetaData, Table, text
+from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.exc import StatementError
+from sqlalchemy.schema import CreateTable
 
 from airflow import settings
 from airflow.sdk import DAG
@@ -34,7 +37,10 @@ from airflow.serialization.enums import DagAttributeTypes, Encoding
 from airflow.serialization.serialized_objects import BaseSerialization
 from airflow.settings import Session
 from airflow.utils.sqlalchemy import (
+    CompactUUID,
     ExecutorConfigType,
+    apply_regex_query_timeout,
+    compact_uuid_default,
     ensure_pod_is_valid_after_unpickling,
     get_dialect_name,
     prohibit_commit,
@@ -43,6 +49,7 @@ from airflow.utils.sqlalchemy import (
 from airflow.utils.state import State
 from airflow.utils.types import DagRunTriggeredByType, DagRunType
 
+from tests_common.test_utils.config import conf_vars
 from tests_common.test_utils.dag import sync_dag_to_db
 
 pytestmark = pytest.mark.db_test
@@ -212,6 +219,26 @@ class TestSqlAlchemyUtils:
             other_session.execute(text("SELECT 1"))
             other_session.commit()
 
+    def test_prohibit_commit_allows_savepoint_release(self):
+        """A SAVEPOINT release (session.begin_nested()) dispatches the same before_commit
+        event as a real commit, but must not trip the guard: it ends neither the outer
+        transaction nor its row locks."""
+        with prohibit_commit(self.session):
+            self.session.execute(text("SELECT 1"))
+            with self.session.begin_nested():
+                self.session.execute(text("SELECT 1"))
+
+            # The guard must still catch a real commit after the savepoint released.
+            with pytest.raises(RuntimeError, match="UNEXPECTED COMMIT"):
+                self.session.commit()
+            self.session.rollback()
+
+            # ...and an explicit commit while still inside an open savepoint.
+            with pytest.raises(RuntimeError, match="UNEXPECTED COMMIT"):
+                with self.session.begin_nested():
+                    self.session.commit()
+            self.session.rollback()
+
     def teardown_method(self):
         self.session.close()
         settings.engine.dispose()
@@ -380,3 +407,119 @@ class TestExecutorConfigType:
         pickle.dumps(fixed_pod)
         assert fixed_pod.local_vars_configuration.refresh_api_key_hook is None
         assert fixed_pod.spec.containers[0].local_vars_configuration.refresh_api_key_hook is None
+
+
+class TestApplyRegexQueryTimeout:
+    @staticmethod
+    def _mock_session(dialect_name):
+        session = mock.MagicMock()
+        session.get_bind.return_value.dialect.name = dialect_name
+        return session
+
+    def test_sets_and_restores_statement_timeout_on_postgresql(self):
+        session = self._mock_session("postgresql")
+        # Pre-existing (e.g. global) statement_timeout captured before we override it.
+        session.execute.return_value.scalar.return_value = "10s"
+        with conf_vars({("api", "regexp_query_timeout"): "5"}):
+            with apply_regex_query_timeout(session):
+                # Capture-then-set on enter.
+                assert session.execute.call_count == 2
+                set_stmt = session.execute.call_args_list[1].args[0]
+                # 5 seconds -> 5000 ms, passed as a bound parameter (no SQL injection).
+                assert set_stmt.compile().params == {"timeout": "5000"}
+        # Restored on exit to the previous value (not reset to 0), so a global timeout is preserved.
+        assert session.execute.call_count == 3
+        restore_stmt = session.execute.call_args_list[2].args[0]
+        assert restore_stmt.compile().params == {"timeout": "10s"}
+
+    def test_sets_and_restores_max_execution_time_on_mysql(self):
+        session = self._mock_session("mysql")
+        # Pre-existing (e.g. global) max_execution_time captured before we override it.
+        session.execute.return_value.scalar.return_value = 1000
+        with conf_vars({("api", "regexp_query_timeout"): "5"}):
+            with apply_regex_query_timeout(session):
+                # Capture-then-set on enter (5 seconds -> 5000 ms).
+                assert session.execute.call_count == 2
+                assert "max_execution_time = 5000" in str(session.execute.call_args.args[0])
+        # Restored on exit to the previous value, so a global limit is preserved.
+        assert session.execute.call_count == 3
+        assert "max_execution_time = 1000" in str(session.execute.call_args.args[0])
+
+    def test_fractional_seconds_are_converted_to_milliseconds(self):
+        session = self._mock_session("postgresql")
+        session.execute.return_value.scalar.return_value = "0"
+        with conf_vars({("api", "regexp_query_timeout"): "0.5"}):
+            with apply_regex_query_timeout(session):
+                # Set is the second call (after capturing the previous value).
+                set_stmt = session.execute.call_args_list[1].args[0]
+                # 0.5 seconds -> 500 ms.
+                assert set_stmt.compile().params == {"timeout": "500"}
+
+    def test_noop_on_sqlite(self):
+        session = self._mock_session("sqlite")
+        with conf_vars({("api", "regexp_query_timeout"): "5"}):
+            with apply_regex_query_timeout(session):
+                pass
+        session.execute.assert_not_called()
+
+    def test_noop_when_timeout_disabled(self):
+        session = self._mock_session("postgresql")
+        with conf_vars({("api", "regexp_query_timeout"): "0"}):
+            with apply_regex_query_timeout(session):
+                pass
+        session.execute.assert_not_called()
+
+
+class TestCompactUUID:
+    value = UUID("0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b")
+
+    @pytest.mark.parametrize(
+        ("dialect", "expected"),
+        [
+            pytest.param(mysql.dialect(), "BINARY(16)", id="mysql"),
+            pytest.param(sqlite.dialect(), "CHAR(32)", id="sqlite"),
+            pytest.param(postgresql.dialect(), "UUID", id="postgresql"),
+        ],
+    )
+    def test_column_type_per_dialect(self, dialect, expected):
+        assert CompactUUID().compile(dialect=dialect) == expected
+
+    @pytest.mark.parametrize("given", [value, str(value)], ids=["uuid", "str"])
+    def test_mysql_stores_the_sixteen_raw_bytes(self, given):
+        assert CompactUUID().process_bind_param(given, mysql.dialect()) == self.value.bytes
+
+    def test_mysql_reads_the_bytes_back_as_a_uuid(self):
+        assert CompactUUID().process_result_value(self.value.bytes, mysql.dialect()) == self.value
+
+    @pytest.mark.parametrize(
+        "dialect", [sqlite.dialect(), postgresql.dialect()], ids=["sqlite", "postgresql"]
+    )
+    def test_other_dialects_leave_the_value_to_the_uuid_type(self, dialect):
+        assert CompactUUID().process_bind_param(self.value, dialect) == self.value
+        assert CompactUUID().process_result_value(self.value, dialect) == self.value
+
+    def test_none_passes_through(self):
+        assert CompactUUID().process_bind_param(None, mysql.dialect()) is None
+        assert CompactUUID().process_result_value(None, mysql.dialect()) is None
+
+    @pytest.mark.parametrize(
+        ("dialect", "expected"),
+        [
+            pytest.param(mysql.dialect(), "(UNHEX('0190a1b2c3d47e5f8a9b0c1d2e3f4a5b'))", id="mysql"),
+            pytest.param(sqlite.dialect(), "'0190a1b2c3d47e5f8a9b0c1d2e3f4a5b'", id="sqlite"),
+            pytest.param(postgresql.dialect(), "'0190a1b2c3d47e5f8a9b0c1d2e3f4a5b'", id="postgresql"),
+        ],
+    )
+    def test_server_default_per_dialect(self, dialect, expected):
+        assert str(compact_uuid_default(self.value).compile(dialect=dialect)) == expected
+
+    def test_mysql_column_default_is_parenthesized_without_a_server_version(self):
+        table = Table(
+            "t",
+            MetaData(),
+            Column(
+                "region_id", CompactUUID(), nullable=False, server_default=compact_uuid_default(self.value)
+            ),
+        )
+        ddl = str(CreateTable(table).compile(dialect=mysql.dialect()))
+        assert "DEFAULT (UNHEX('0190a1b2c3d47e5f8a9b0c1d2e3f4a5b'))" in ddl

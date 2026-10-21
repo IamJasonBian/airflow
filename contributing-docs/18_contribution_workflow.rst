@@ -187,26 +187,10 @@ Step 4: Prepare PR
 
    * Run the appropriate tests as described in `Testing documentation <09_testing.rst>`__.
 
-   * Consider adding a newsfragment to your PR so you can add an entry in the release notes.
-     The following newsfragment types are supported:
-
-     * `significant`
-     * `feature`
-     * `improvement`
-     * `bugfix`
-     * `doc`
-     * `misc`
-
-     To add a newsfragment, create an ``rst`` file named ``{pr_number}.{type}.rst`` (e.g. ``1234.bugfix.rst``)
-     and place in either `airflow-core/newsfragments </airflow-core/newsfragments>`__ for core newsfragments,
-     or `chart/newsfragments </chart/newsfragments>`__ for helm chart newsfragments.
-
-     In general newsfragments must be one line.  For newsfragment type ``significant``, you may include summary and body separated by a blank line, similar to ``git`` commit messages.
-     One thing to note here is that a ``significant`` newsfragment doesn't have to be a breaking change, it can be something that is notable but not breaking.
-
-     A CI check validates that newsfragment filenames use the correct PR number. If you need to skip
-     this check (e.g. when cherry-picking a newsfragment from another PR), add the
-     ``skip newsfragment check`` label to your PR.
+   * Check whether your PR needs a newsfragment. Most PRs do not: the release notes for ordinary bug fixes,
+     features and doc changes are built from the commit title. Add one only for a change users must read
+     before upgrading, such as a behaviour change, a removal, a new default or migration steps. A maintainer
+     will ask if your PR needs one. See `Newsfragments`_ below for the details.
 
 2. Rebase your fork, squash commits, and resolve all conflicts. See `How to rebase PR <10_working_with_git.rst#how-to-rebase-pr>`_
    if you need help with rebasing your change. Remember to rebase often if your PR takes a lot of time to
@@ -244,6 +228,41 @@ Step 4: Prepare PR
    they want to get it reviewed and merged.
 
 
+Newsfragments
+~~~~~~~~~~~~~
+
+Newsfragments are only consumed by ``airflow-core/``, ``chart/`` and ``dev/mypy/``. Do not add one by default.
+
+For ``airflow-core/``, use only ``significant`` newsfragments, and only for a change users must read before
+upgrading:
+
+* a behaviour change, a removal or a new default,
+* a change that needs migration steps.
+
+``task-sdk/`` has no release notes of its own. Its changes are listed in the Airflow release notes, so put
+newsfragments for ``task-sdk/`` changes in ``airflow-core/newsfragments/``.
+
+A ``significant`` newsfragment does not have to be a breaking change. Do not add a newsfragment for an
+ordinary bug fix, feature, improvement or documentation change, or for internal refactors, CI, tooling and
+tests. For ``chart/``, add a newsfragment only for major or breaking changes.
+
+If you are unsure, leave it out. A maintainer will ask for one during review if it is needed.
+
+Never add newsfragments for ``providers/`` or ``airflow-ctl/``: their release managers regenerate the
+changelog from the commit history. For a user-visible note, edit the changelog directly: the provider's
+``docs/changelog.rst`` (see `providers/AGENTS.md </providers/AGENTS.md#changelog--never-use-newsfragments>`__)
+or ``airflow-ctl/RELEASE_NOTES.rst``.
+
+To add a newsfragment, create an ``rst`` file named ``{pr_number}.significant.rst`` (e.g. ``1234.significant.rst``)
+and place it in `airflow-core/newsfragments </airflow-core/newsfragments>`__ for core newsfragments, or
+`chart/newsfragments </chart/newsfragments>`__ for helm chart newsfragments. It can be a single line, or a
+summary and a body separated by a blank line, similar to ``git`` commit messages.
+
+A CI check validates that newsfragment filenames use the correct PR number. If you need to skip this check
+(e.g. when cherry-picking a newsfragment from another PR), add the ``skip newsfragment check`` label to
+your PR.
+
+
 Step 5: Pass PR Review
 ----------------------
 
@@ -276,7 +295,7 @@ The reviewers might leave several types of responses:
   the comment, you can ask for clarifications. Generally assume good intention of the person who is reviewing
   your code and resolve conversations also having good intentions. Understand that it's not a person that
   is criticised or argued with, but rather the code and the approach. The important thing is to take care
-  about quality of the the code and the project and want to make sure that the code is good.
+  about quality of the code and the project and want to make sure that the code is good.
 
   It's ok to mark the conversation resolved by anyone who can do it - it could be the author, who thinks
   the arguments are changes implemented make the conversation resolved, or the maintainer/person who

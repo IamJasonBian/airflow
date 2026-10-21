@@ -48,6 +48,7 @@ from airflow.providers.common.compat.sdk import (
     AirflowSkipException,
     AirflowTaskTimeout,
     TaskDeferred,
+    timezone,
 )
 from airflow.providers.google.cloud.openlineage.utils import BIGQUERY_NAMESPACE
 from airflow.providers.google.cloud.operators.bigquery import (
@@ -82,7 +83,6 @@ from airflow.providers.google.cloud.triggers.bigquery import (
     BigQueryValueCheckTrigger,
 )
 from airflow.utils.task_group import TaskGroup
-from airflow.utils.timezone import datetime
 
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_3_PLUS
 
@@ -99,7 +99,7 @@ TEST_GCS_CSV_DATA = ["dir1/*.csv"]
 TEST_SOURCE_CSV_FORMAT = "CSV"
 TEST_GCS_PARQUET_DATA = ["dir1/*.parquet"]
 TEST_SOURCE_PARQUET_FORMAT = "PARQUET"
-DEFAULT_DATE = datetime(2015, 1, 1)
+DEFAULT_DATE = timezone.datetime(2015, 1, 1)
 TEST_DAG_ID = "test-bigquery-operators"
 TEST_TABLE_RESOURCES = {"tableReference": {"tableId": TEST_TABLE_ID}, "expirationTime": 1234567}
 VIEW_DEFINITION = {
@@ -1035,6 +1035,16 @@ class TestBigQueryUpsertTableOperator:
 
 
 class TestBigQueryInsertJobOperator:
+    def test_init_does_not_snapshot_templated_job_id(self):
+        op = BigQueryInsertJobOperator(
+            task_id="insert_query_job",
+            configuration={"query": {"query": "SELECT 1", "useLegacySql": False}},
+            job_id="report_{{ ds_nodash }}",
+        )
+
+        assert op.job_id == "report_{{ ds_nodash }}"
+        assert op._configured_job_id is None
+
     @mock.patch("airflow.providers.google.cloud.operators.bigquery.BigQueryHook")
     def test_execute_query_success(self, mock_hook):
         job_id = "123456"
@@ -1186,6 +1196,18 @@ class TestBigQueryInsertJobOperator:
             location=TEST_DATASET_LOCATION,
             project_id=TEST_GCP_PROJECT_ID,
         )
+
+    def test_on_kill_before_execute(self):
+        op = BigQueryInsertJobOperator(
+            task_id="insert_query_job",
+            configuration={"query": {"query": "SELECT * FROM any", "useLegacySql": False}},
+            location=TEST_DATASET_LOCATION,
+            job_id="123456",
+            project_id=TEST_GCP_PROJECT_ID,
+            durable=False,
+        )
+
+        op.on_kill()
 
     @mock.patch("airflow.providers.google.cloud.operators.bigquery.BigQueryHook")
     @mock.patch("airflow.providers.google.cloud.hooks.bigquery.BigQueryJob")
@@ -2549,6 +2571,10 @@ class TestBigQueryInsertJobOperatorDurable:
 
         assert op.is_job_succeeded("success") is True
         assert op.is_job_succeeded("RUNNING") is False
+
+    def test_default_args_durable_reaches_operator(self):
+        op = self._make_operator(default_args={"durable": False})
+        assert op.durable is False
 
 
 class TestBigQueryIntervalCheckOperator:

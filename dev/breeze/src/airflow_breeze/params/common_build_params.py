@@ -25,10 +25,12 @@ from typing import Any
 from airflow_breeze.branch_defaults import AIRFLOW_BRANCH, DEFAULT_AIRFLOW_CONSTRAINTS_BRANCH
 from airflow_breeze.global_constants import (
     ALLOWED_BUILD_PROGRESS,
+    ALLOWED_DEBIAN_VERSIONS,
     ALLOWED_INSTALL_MYSQL_CLIENT_TYPES,
     APACHE_AIRFLOW_GITHUB_REPOSITORY,
     DOCKER_DEFAULT_PLATFORM,
     get_airflow_version,
+    get_hardened_python_base_image,
 )
 from airflow_breeze.utils.console import console_print
 from airflow_breeze.utils.platforms import get_normalized_platform
@@ -51,6 +53,7 @@ class CommonBuildParams:
     airflow_constraints_location: str | None = None
     builder: str = "autodetect"
     build_progress: str = ALLOWED_BUILD_PROGRESS[0]
+    cache_from_image: str | None = None
     constraints_github_repository: str = APACHE_AIRFLOW_GITHUB_REPOSITORY
     commit_sha: str | None = None
     dev_apt_command: str | None = None
@@ -66,11 +69,11 @@ class CommonBuildParams:
     prepare_buildx_cache: bool = False
     python_image: str | None = None
     push: bool = False
-    python: str = "3.10"
+    python: str = "3.11"
     dry_run: bool = False
     version_suffix: str | None = None
     verbose: bool = False
-    debian_version: str = "bookworm"
+    debian_version: str = ALLOWED_DEBIAN_VERSIONS[0]
     build_arg_values: list[str] = field(default_factory=list)
 
     @property
@@ -107,6 +110,15 @@ class CommonBuildParams:
             extra_flags.append(f"--cache-from={self.get_cache(self.platform)}")
         elif self.docker_cache == "disabled":
             extra_flags.append("--no-cache")
+        if self.cache_from_image:
+            extra_flags.append(f"--cache-from={self.cache_from_image}")
+        if self.docker_cache != "disabled":
+            # Records the layer cache keys in the image config, which is what lets an image
+            # built by an earlier run serve as `--cache-from` for a later one. BuildKit only
+            # honours those records when it can pull the layers from a registry, so an image
+            # that travelled as a saved tarball has to be pushed to one (even a throw-away
+            # local registry) before it can be passed as `--cache-from-image`.
+            extra_flags.append("--build-arg=BUILDKIT_INLINE_CACHE=1")
         return extra_flags
 
     @property
@@ -114,7 +126,7 @@ class CommonBuildParams:
         """Construct Python Base Image"""
         if self.python_image is not None:
             return self.python_image
-        return f"debian:{self.debian_version}-slim"
+        return get_hardened_python_base_image(self.python, self.debian_version)
 
     @property
     def airflow_image_repository(self):

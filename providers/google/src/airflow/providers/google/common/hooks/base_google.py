@@ -427,11 +427,17 @@ class GoogleBaseHook(BaseHook):
                 "and can contain only lowercase letters, digits, and hyphens."
             )
 
-    def is_default_universe(self) -> bool:
+    @staticmethod
+    def is_default_universe() -> bool:
         global_universe_domain = os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", None)
         if global_universe_domain in ("googleapis.com", "", None):
             return True
         return False
+
+    @staticmethod
+    def get_high_value_cookie_domain() -> str:
+        domain = os.getenv("GOOGLE_CLOUD_HIGH_VALUE_COOKIE_DOMAIN")
+        return "google.com" if domain in (None, "") else domain
 
     def get_client_options(
         self,
@@ -879,7 +885,7 @@ class _CredentialsToken(Token):
         # On subsequent calls of `get` it will be used with `datetime.datetime.utcnow()`.
         # Therefore we have to use an offset-naive datetime.
         # https://github.com/talkiq/gcloud-aio/blob/f1132b005ba35d8059229a9ca88b90f31f77456d/auth/gcloud/aio/auth/token.py#L204
-        return datetime.datetime.now(tz=datetime.timezone.utc).replace(tzinfo=None)
+        return datetime.datetime.now(tz=datetime.UTC).replace(tzinfo=None)
 
 
 class GoogleBaseAsyncHook(BaseHook):

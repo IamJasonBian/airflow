@@ -45,6 +45,7 @@ HOST = "xx.cloud.databricks.com"
 HOST_WITH_SCHEME = "https://xx.cloud.databricks.com"
 TOKEN = "token"
 HTTP_PATH = "sql/protocolv1/o/1234567890123456/0123-456789-abcd123"
+ENDPOINT_HTTP_PATH = "/sql/1.0/endpoints/1264e5078741679a"
 SCHEMA = "test_schema"
 CATALOG = "test_catalog"
 
@@ -94,7 +95,7 @@ def mock_get_requests():
                 "name": "Test",
                 "odbc_params": {
                     "hostname": "xx.cloud.databricks.com",
-                    "path": "/sql/1.0/endpoints/1264e5078741679a",
+                    "path": ENDPOINT_HTTP_PATH,
                 },
             }
         ]
@@ -148,6 +149,41 @@ def test_get_uri():
         f"catalog={CATALOG}&http_path={quote_plus(HTTP_PATH)}&schema={SCHEMA}"
     )
     assert uri == expected_uri
+
+
+@mock.patch("airflow.providers.databricks.hooks.databricks_sql.sql.connect")
+def test_get_conn_prefers_sql_endpoint_name_over_connection_extra_http_path(mock_connect, mock_get_requests):
+    hook = DatabricksSqlHook(databricks_conn_id=DEFAULT_CONN_ID, sql_endpoint_name="Test")
+    hook.databricks_conn = Connection(
+        conn_id=DEFAULT_CONN_ID,
+        conn_type="databricks",
+        host=HOST,
+        password=TOKEN,
+        extra={"http_path": "sql/protocolv1/o/extra/path"},
+    )
+
+    hook.get_conn()
+
+    mock_connect.assert_called_once()
+    assert mock_connect.call_args.args[1] == ENDPOINT_HTTP_PATH
+
+
+def test_sqlalchemy_url_uses_connection_extra_http_path_without_endpoint_lookup():
+    hook = DatabricksSqlHook(databricks_conn_id=DEFAULT_CONN_ID, sql_endpoint_name="Test")
+    hook.databricks_conn = Connection(
+        conn_id=DEFAULT_CONN_ID,
+        conn_type="databricks",
+        host=HOST,
+        password=TOKEN,
+        extra={"http_path": "sql/protocolv1/o/extra/path"},
+    )
+
+    with mock.patch.object(DatabricksSqlHook, "_get_sql_endpoint_by_name", autospec=True) as mock_endpoint:
+        url = hook.sqlalchemy_url.render_as_string(hide_password=False)
+
+    assert "http_path=sql%2Fprotocolv1%2Fo%2Fextra%2Fpath" in url
+    assert hook._http_path is None
+    mock_endpoint.assert_not_called()
 
 
 def get_cursor_descriptions(fields: list[str]) -> list[tuple[str]]:
@@ -626,7 +662,10 @@ def test_get_openlineage_database_specific_lineage_with_single_query_id(mock_emi
     hook = DatabricksSqlHook()
     hook.query_ids = ["query1"]
     hook.get_connection = mock.MagicMock()
-    hook.get_openlineage_database_info = lambda x: mock.MagicMock(authority="auth", scheme="scheme")
+    hook.get_openlineage_database_info = lambda x: mock.MagicMock(
+        authority="auth", scheme="scheme", database="mydb"
+    )
+    hook.get_openlineage_default_schema = lambda: "myschema"
 
     ti = mock.MagicMock()
 
@@ -638,6 +677,8 @@ def test_get_openlineage_database_specific_lineage_with_single_query_id(mock_emi
             "query_source_namespace": "scheme://auth",
             "task_instance": ti,
             "query_for_extra_metadata": True,
+            "default_database": "mydb",
+            "default_schema": "myschema",
         }
     )
     assert result == OperatorLineage(
@@ -650,7 +691,10 @@ def test_get_openlineage_database_specific_lineage_with_multiple_query_ids(mock_
     hook = DatabricksSqlHook()
     hook.query_ids = ["query1", "query2"]
     hook.get_connection = mock.MagicMock()
-    hook.get_openlineage_database_info = lambda x: mock.MagicMock(authority="auth", scheme="scheme")
+    hook.get_openlineage_database_info = lambda x: mock.MagicMock(
+        authority="auth", scheme="scheme", database="mydb"
+    )
+    hook.get_openlineage_default_schema = lambda: "myschema"
 
     ti = mock.MagicMock()
 
@@ -662,6 +706,8 @@ def test_get_openlineage_database_specific_lineage_with_multiple_query_ids(mock_
             "query_source_namespace": "scheme://auth",
             "task_instance": ti,
             "query_for_extra_metadata": True,
+            "default_database": "mydb",
+            "default_schema": "myschema",
         }
     )
     assert result is None
@@ -675,7 +721,7 @@ def test_get_openlineage_database_specific_lineage_with_old_openlineage_provider
     hook.get_openlineage_database_info = lambda x: mock.MagicMock(authority="auth", scheme="scheme")
 
     expected_err = (
-        "OpenLineage provider version `1.99.0` is lower than required `2.5.0`, "
+        "OpenLineage provider version `1.99.0` is lower than required `2.16.0`, "
         "skipping function `emit_openlineage_events_for_databricks_queries` execution"
     )
     with pytest.raises(AirflowOptionalProviderFeatureException, match=expected_err):

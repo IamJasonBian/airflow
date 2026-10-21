@@ -27,6 +27,7 @@ from airflow_breeze.global_constants import (
     ALLOWED_BUILD_CACHE,
     ALLOWED_BUILD_PROGRESS,
     ALLOWED_DEBIAN_VERSIONS,
+    ALLOWED_IMAGE_FLAVORS,
     ALLOWED_INSTALL_MYSQL_CLIENT_TYPES,
     ALLOWED_PLATFORMS,
     DOCKER_DEFAULT_PLATFORM,
@@ -101,6 +102,12 @@ option_build_progress = click.option(
     show_default=True,
     default=ALLOWED_BUILD_PROGRESS[0],
 )
+option_cache_from_image = click.option(
+    "--cache-from-image",
+    help="Additional image to read the build cache from - it has to be pullable from a registry, "
+    "an image only present in the local docker engine contributes no cache.",
+    envvar="CACHE_FROM_IMAGE",
+)
 option_debian_version = click.option(
     "--debian-version",
     type=BetterChoice(ALLOWED_DEBIAN_VERSIONS),
@@ -108,6 +115,15 @@ option_debian_version = click.option(
     show_default=True,
     help="Debian version used in Airflow image as base for building images.",
     envvar="DEBIAN_VERSION",
+)
+option_image_flavor = click.option(
+    "--image-flavor",
+    type=BetterChoice(ALLOWED_IMAGE_FLAVORS),
+    default=ALLOWED_IMAGE_FLAVORS[0],
+    show_default=True,
+    help="Flavor of the PROD image. 'hardened' gets Python from a Docker Hardened Image, "
+    "'legacy' compiles Python from sources on a plain Debian base image.",
+    envvar="IMAGE_FLAVOR",
 )
 option_dev_apt_command = click.option(
     "--dev-apt-command",
@@ -199,6 +215,11 @@ option_skip_image_file_deletion = click.option(
     help="Skip image deletion after loading.",
     is_flag=True,
     envvar="SKIP_IMAGE_FILE_DELETION",
+)
+option_tag_as = click.option(
+    "--tag-as",
+    help="Additionally tag the loaded image with this reference.",
+    envvar="TAG_AS",
 )
 option_from_run = click.option(
     "--from-run",
